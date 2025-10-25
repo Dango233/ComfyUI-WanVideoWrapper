@@ -125,6 +125,12 @@ def parse_structured_prompt(
     if spans["global"] is None and spans["shots"] is None:
         return None
 
+    hf_tokenizer = getattr(tokenizer, "tokenizer", None)
+    fast_flag = getattr(hf_tokenizer, "is_fast", None)
+    print(
+        f"[ShotUtils] tokenizer type={type(tokenizer)} backend={type(hf_tokenizer)} is_fast={fast_flag}"
+    )
+
     tokenized = tokenizer(
         prompt,
         return_mask=True,
