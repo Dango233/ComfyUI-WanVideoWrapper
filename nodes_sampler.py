@@ -604,23 +604,28 @@ class WanVideoSampler:
         latent_video_length = noise.shape[1]
 
         if shot_attention_cfg:
-            if text_cut_positions is None:
-                raise ValueError("Shot Attention 需要结构化提示文本，请使用 [global caption]/[per shot caption]/[shot cut] 格式。")
-            if isinstance(text_cut_positions, list):
-                if len(text_cut_positions) == 0:
-                    raise ValueError("Shot Attention 需要结构化提示文本，当前 text_cut_positions 为空。")
+            debug_info = {"shot_args_present": shot_args is not None,
+                           "text_cut_positions_type": type(text_cut_positions).__name__,
+                           "model_shot_cfg": shot_attention_cfg,
+                           "prompt_positions_sample": None}
+            if isinstance(text_cut_positions, list) and len(text_cut_positions) > 0:
+                debug_info["prompt_positions_sample"] = text_cut_positions[0]
                 first_shot_positions = text_cut_positions[0]
-            else:
+            elif isinstance(text_cut_positions, dict):
+                debug_info["prompt_positions_sample"] = text_cut_positions
                 first_shot_positions = text_cut_positions
-            if not first_shot_positions or first_shot_positions.get("global") is None:
-                raise ValueError("Shot Attention 需要在 prompt 中标注 [global caption]/[per shot caption]/[shot cut]，请检查提示词。")
+            else:
+                raise ValueError(f"Shot Attention 需要结构化提示文本，但未获取到 text_cut_positions。诊断: {debug_info}")
+
+            if not first_shot_positions or first_shot_positions.get('global') is None:
+                raise ValueError(f"Shot Attention 需要在 prompt 中标注 [global caption]/[per shot caption]/[shot cut]。诊断: {debug_info}")
 
             shot_cut_frames = shot_args.get("shot_cut_frames", [])
             try:
                 shot_indices_tensor = build_shot_indices(latent_video_length, shot_cut_frames)
                 shot_indices_tensor = shot_indices_tensor.to(device)
             except Exception as exc:
-                raise ValueError(f"鏡頭切點解析失败: {exc}") from exc
+                raise ValueError(f"鏡頭切點解析失败: {exc}. 诊断: {debug_info}") from exc
         else:
             first_shot_positions = None
             shot_indices_tensor = None
