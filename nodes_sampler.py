@@ -9,6 +9,7 @@ from diffusers.schedulers import FlowMatchEulerDiscreteScheduler
 from .wanvideo.modules.model import rope_params
 from .custom_linear import remove_lora_from_module, set_lora_params, _replace_linear
 from .wanvideo.schedulers import get_scheduler, get_sampling_sigmas, retrieve_timesteps, scheduler_list
+from .wanvideo.modules.shot_utils import build_shot_indices
 from .gguf.gguf import set_lora_params_gguf
 from .multitalk.multitalk import timestep_transform, add_noise
 from .utils import(log, print_memory, apply_lora, clip_encode_image_tiled, fourier_filter, optimized_scale, setup_radial_attention,
@@ -143,6 +144,8 @@ class WanVideoSampler:
                 "uni3c_embeds": ("UNI3C_EMBEDS", ),
                 "multitalk_embeds": ("MULTITALK_EMBEDS", ),
                 "freeinit_args": ("FREEINITARGS", ),
+                "shot_args": ("SHOTARGS", ),
+                "shot_attention_options": ("SHOTATTENTION", ),
                 "start_step": ("INT", {"default": 0, "min": 0, "max": 10000, "step": 1, "tooltip": "Start step for the sampling, 0 means full sampling, otherwise samples only from this step"}),
                 "end_step": ("INT", {"default": -1, "min": -1, "max": 10000, "step": 1, "tooltip": "End step for the sampling, -1 means full sampling, otherwise samples only until this step"}),
                 "add_noise_to_samples": ("BOOLEAN", {"default": False, "tooltip": "Add noise to the samples before sampling, needed for video2video sampling when starting from clean video"}),
@@ -157,7 +160,8 @@ class WanVideoSampler:
     def process(self, model, image_embeds, shift, steps, cfg, seed, scheduler, riflex_freq_index, text_embeds=None,
         force_offload=True, samples=None, feta_args=None, denoise_strength=1.0, context_options=None,
         cache_args=None, teacache_args=None, flowedit_args=None, batched_cfg=False, slg_args=None, rope_function="default", loop_args=None,
-        experimental_args=None, sigmas=None, unianimate_poses=None, fantasytalking_embeds=None, uni3c_embeds=None, multitalk_embeds=None, freeinit_args=None, start_step=0, end_step=-1, add_noise_to_samples=False):
+        experimental_args=None, sigmas=None, unianimate_poses=None, fantasytalking_embeds=None, uni3c_embeds=None, multitalk_embeds=None, freeinit_args=None,
+        shot_args=None, shot_attention_options=None, start_step=0, end_step=-1, add_noise_to_samples=False):
 
         patcher = model
         model = model.model
@@ -174,6 +178,36 @@ class WanVideoSampler:
 
         transformer_options = patcher.model_options.get("transformer_options", None)
         merge_loras = transformer_options["merge_loras"]
+
+        model_shot_cfg = transformer_options.get("shot_attention") if transformer_options is not None else None
+        model_shot_enabled = bool(model_shot_cfg and model_shot_cfg.get("enabled", False))
+
+        options_connected = shot_attention_options is not None
+        options_enabled = bool(shot_attention_options.get("enabled", True)) if options_connected else False
+        args_present = shot_args is not None
+
+        if model_shot_enabled:
+            if not args_present:
+                raise ValueError("已在模型加载阶段启用 Shot Attention，但采样时缺少 WanVideoShotArgs。请补齐节点或全部关闭。")
+            if options_connected and not options_enabled:
+                raise ValueError("WanVideoShotAttentionOptions 已连接却关闭 enable。请保持所有 Shot Attention 节点一致开启或一致关闭。")
+        else:
+            if args_present:
+                raise ValueError("检测到 WanVideoShotArgs，但模型未通过 WanVideoSetShotAttention 启用 Shot Attention。")
+            if options_connected and options_enabled:
+                raise ValueError("WanVideoShotAttentionOptions 启用了 Shot Attention，但模型未配置。请先在模型加载阶段开启。")
+
+        if not model_shot_enabled:
+            shot_attention_cfg = None
+            shot_mask_type = None
+        else:
+            shot_attention_cfg = dict(model_shot_cfg)
+            if options_connected:
+                shot_attention_cfg.update(shot_attention_options)
+            shot_attention_cfg.setdefault("enabled", True)
+            shot_attention_cfg.setdefault("mode", "firstk")
+            shot_attention_cfg.setdefault("mask_type", "none")
+            shot_mask_type = shot_attention_cfg.get("mask_type")
 
         block_swap_args = transformer_options.get("block_swap_args", None)
         if block_swap_args is not None:
@@ -233,6 +267,10 @@ class WanVideoSampler:
             }
         else:
             text_embeds = dict_to_device(text_embeds, device)
+
+        text_cut_positions = text_embeds.get("text_cut_positions") if isinstance(text_embeds, dict) else None
+
+        shot_indices_tensor = None
 
         seed_g = torch.Generator(device=torch.device("cpu"))
         seed_g.manual_seed(seed)
@@ -564,6 +602,28 @@ class WanVideoSampler:
             has_ref = image_cond is not None or has_ref
 
         latent_video_length = noise.shape[1]
+
+        if shot_attention_cfg:
+            if text_cut_positions is None:
+                raise ValueError("Shot Attention 需要结构化提示文本，请使用 [global caption]/[per shot caption]/[shot cut] 格式。")
+            if isinstance(text_cut_positions, list):
+                if len(text_cut_positions) == 0:
+                    raise ValueError("Shot Attention 需要结构化提示文本，当前 text_cut_positions 为空。")
+                first_shot_positions = text_cut_positions[0]
+            else:
+                first_shot_positions = text_cut_positions
+            if not first_shot_positions or first_shot_positions.get("global") is None:
+                raise ValueError("Shot Attention 需要在 prompt 中标注 [global caption]/[per shot caption]/[shot cut]，请检查提示词。")
+
+            shot_cut_frames = shot_args.get("shot_cut_frames", [])
+            try:
+                shot_indices_tensor = build_shot_indices(latent_video_length, shot_cut_frames)
+                shot_indices_tensor = shot_indices_tensor.to(device)
+            except Exception as exc:
+                raise ValueError(f"鏡頭切點解析失败: {exc}") from exc
+        else:
+            first_shot_positions = None
+            shot_indices_tensor = None
 
         # Initialize FreeInit filter if enabled
         freq_filter = None
@@ -1365,6 +1425,10 @@ class WanVideoSampler:
                     'fun_camera': control_camera_input if control_camera_latents is not None else None, # Fun model camera embed
                     'audio_proj': audio_proj if fantasytalking_embeds is not None else None, # FantasyTalking audio projection
                     'audio_scale': audio_scale, # FantasyTalking audio scale
+                    'shot_indices': shot_indices_tensor,
+                    'shot_attention_cfg': shot_attention_cfg,
+                    'shot_mask_type': shot_mask_type,
+                    'text_cut_positions': first_shot_positions if shot_attention_cfg else None,
                     "uni3c_data": uni3c_data_input, # Uni3C input
                     "controlnet": controlnet, # TheDenk's controlnet input
                     "add_cond": add_cond_input, # additional conditioning input

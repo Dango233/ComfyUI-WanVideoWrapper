@@ -5,6 +5,7 @@ import numpy as np
 import hashlib
 
 from .wanvideo.schedulers import get_scheduler, scheduler_list
+from .wanvideo.modules.shot_utils import enforce_4t_plus_1, parse_shot_cut_string, parse_structured_prompt
 
 from .utils import(log, clip_encode_image_tiled, add_noise_to_reference_video, set_module_tensor_to_device)
 from .taehv import TAEHV
@@ -148,6 +149,101 @@ class WanVideoBlockList:
                         raise ValueError(f"Invalid integer: '{part}'")
         return (block_list,)
 
+
+
+
+class WanVideoShotArgs:
+    @classmethod
+    def INPUT_TYPES(s):
+        return {
+            "required": {
+                "total_frames": ("INT", {"default": 81, "min": 5, "max": 2049, "step": 1, "tooltip": "Total pixel frames to generate (rounded to 4t+1)."}),
+                "shot_cut_frames": ("STRING", {"default": "40, 80", "tooltip": "Comma or space separated frame indices where a new shot begins."}),
+            }
+        }
+
+    RETURN_TYPES = ("SHOTARGS",)
+    RETURN_NAMES = ("shot_args",)
+    FUNCTION = "process"
+    CATEGORY = "WanVideoWrapper"
+
+    def process(self, total_frames, shot_cut_frames):
+        total_frames_proc = enforce_4t_plus_1(total_frames)
+        try:
+            raw_cuts = parse_shot_cut_string(shot_cut_frames)
+        except ValueError as exc:
+            raise ValueError(f"Failed to parse shot cut frames: {exc}") from exc
+
+        processed_cuts = []
+        for frame in raw_cuts:
+            frame_proc = enforce_4t_plus_1(frame)
+            if 0 < frame_proc < total_frames_proc:
+                processed_cuts.append(frame_proc)
+
+        return ({
+            "total_frames": total_frames_proc,
+            "shot_cut_frames": processed_cuts,
+        },)
+
+
+class WanVideoSetShotAttention:
+    @classmethod
+    def INPUT_TYPES(s):
+        return {
+            "required": {
+                "model": ("WANVIDEOMODEL",),
+                "enable": ("BOOLEAN", {"default": False, "tooltip": "Toggle shot-aware sparse attention."}),
+                "global_tokens": ("INT", {"default": 64, "min": 0, "max": 512, "step": 1, "tooltip": "Number of shared tokens pooled per shot."}),
+            },
+            "optional": {
+                "pooling_mode": (["firstk", "linspace", "mean"], {"default": "firstk", "tooltip": "Representative selection strategy per shot."}),
+                "mask_type": (["none", "normalized", "alternating"], {"default": "none", "tooltip": "Reserved for future shot-mask features."}),
+            }
+        }
+
+    RETURN_TYPES = ("WANVIDEOMODEL",)
+    RETURN_NAMES = ("model",)
+    FUNCTION = "apply"
+    CATEGORY = "WanVideoWrapper"
+
+    def apply(self, model, enable, global_tokens, pooling_mode="firstk", mask_type="none"):
+        patcher = model.clone()
+        transformer_options = patcher.model_options.setdefault("transformer_options", {})
+        transformer_options["shot_attention"] = {
+            "enabled": bool(enable),
+            "global_tokens": int(global_tokens),
+            "mode": pooling_mode,
+            "mask_type": mask_type,
+        }
+        return (patcher,)
+
+
+class WanVideoShotAttentionOptions:
+    @classmethod
+    def INPUT_TYPES(s):
+        return {
+            "required": {
+                "enable": ("BOOLEAN", {"default": True}),
+                "global_tokens": ("INT", {"default": 64, "min": 0, "max": 512, "step": 1}),
+            },
+            "optional": {
+                "pooling_mode": (["firstk", "linspace", "mean"], {"default": "firstk"}),
+                "mask_type": (["none", "normalized", "alternating"], {"default": "none"}),
+            }
+        }
+
+    RETURN_TYPES = ("SHOTATTENTION",)
+    RETURN_NAMES = ("shot_attention_options",)
+    FUNCTION = "create"
+    CATEGORY = "WanVideoWrapper"
+
+    def create(self, enable, global_tokens, pooling_mode="firstk", mask_type="none"):
+        return ({
+            "enabled": bool(enable),
+            "global_tokens": int(global_tokens),
+            "mode": pooling_mode,
+            "mask_type": mask_type,
+        },)
 
 
 # In-memory cache for prompt extender output
@@ -402,10 +498,23 @@ class WanVideoTextEncode:
             mm.soft_empty_cache()
             gc.collect()
 
+        shot_positions = []
+        if hasattr(encoder, "tokenizer"):
+            for prompt_text in positive_prompts:
+                try:
+                    positions = parse_structured_prompt(prompt_text, encoder.tokenizer)
+                except Exception as exc:
+                    log.warning(f"Shot prompt parsing failed: {exc}")
+                    positions = None
+                shot_positions.append(positions)
+        else:
+            shot_positions = [None for _ in positive_prompts]
+
         prompt_embeds_dict = {
             "prompt_embeds": context,
             "negative_prompt_embeds": context_null,
             "echoshot": echoshot,
+            "text_cut_positions": shot_positions,
         }
 
         # Save each part to its own cache file if needed
@@ -2195,6 +2304,9 @@ NODE_CLASS_MAPPINGS = {
     "WanVideoFreeInitArgs": WanVideoFreeInitArgs,
     "WanVideoSetRadialAttention": WanVideoSetRadialAttention,
     "WanVideoBlockList": WanVideoBlockList,
+    "WanVideoShotArgs": WanVideoShotArgs,
+    "WanVideoSetShotAttention": WanVideoSetShotAttention,
+    "WanVideoShotAttentionOptions": WanVideoShotAttentionOptions,
     "WanVideoTextEncodeCached": WanVideoTextEncodeCached,
     "WanVideoAddExtraLatent": WanVideoAddExtraLatent,
     "WanVideoScheduler": WanVideoScheduler,
@@ -2235,6 +2347,9 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "WanVideoFreeInitArgs": "WanVideo Free Init Args",
     "WanVideoSetRadialAttention": "WanVideo Set Radial Attention",
     "WanVideoBlockList": "WanVideo Block List",
+    "WanVideoShotArgs": "WanVideo Shot Args",
+    "WanVideoSetShotAttention": "WanVideo Set Shot Attention",
+    "WanVideoShotAttentionOptions": "WanVideo Shot Attention Options",
     "WanVideoTextEncodeCached": "WanVideo TextEncode Cached",
     "WanVideoAddExtraLatent": "WanVideo Add Extra Latent",
     "WanVideoAddStandInLatent": "WanVideo Add StandIn Latent",

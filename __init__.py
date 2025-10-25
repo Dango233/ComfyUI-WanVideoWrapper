@@ -9,6 +9,18 @@ try:
 except:
     pass
 
+import sys
+
+try:
+    from . import wanvideo as _wan_pkg
+    sys.modules.setdefault("wanvideo", _wan_pkg)
+    from .wanvideo import modules as _wan_modules
+    sys.modules.setdefault("wanvideo.modules", _wan_modules)
+    from .wanvideo.modules import shot_utils as _wan_shot_utils
+    sys.modules.setdefault("wanvideo.modules.shot_utils", _wan_shot_utils)
+except Exception:
+    pass
+
 from .nodes import NODE_CLASS_MAPPINGS, NODE_DISPLAY_NAME_MAPPINGS
 from .recammaster.nodes import NODE_CLASS_MAPPINGS as RECAM_MASTER_NODE_CLASS_MAPPINGS, NODE_DISPLAY_NAME_MAPPINGS as RECAM_MASTER_NODE_DISPLAY_NAME_MAPPINGS
 from .skyreels.nodes import NODE_CLASS_MAPPINGS as SKYREELS_NODE_CLASS_MAPPINGS, NODE_DISPLAY_NAME_MAPPINGS as SKYREELS_NODE_DISPLAY_NAME_MAPPINGS
