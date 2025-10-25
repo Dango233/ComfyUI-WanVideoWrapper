@@ -1094,7 +1094,10 @@ class WanAttentionBlock(nn.Module):
         humo_audio_input=None, humo_audio_scale=1.0, #humo audio
         lynx_x_ip=None, lynx_ref_feature=None, lynx_ip_scale=1.0, lynx_ref_scale=1.0, #lynx
         x_ovi=None, e_ovi=None, freqs_ovi=None, context_ovi=None, seq_lens_ovi=None, grid_sizes_ovi=None,
-        num_cond_latents=None, #longcat image cond amount
+        num_cond_latents=None,
+        shot_config=None,
+        cross_attn_mask=None,
+        **extra_kwargs,
     ):
         r"""
         Args:
@@ -1206,8 +1209,11 @@ class WanAttentionBlock(nn.Module):
                       and inner_t is None
                       and x_ip is None  # Don't split when using IP-Adapter
                       )
-        shot_config = kwargs.get("shot_config", None)
-        cross_attn_mask = kwargs.get("cross_attn_mask", None)
+        if extra_kwargs:
+            log.debug(
+                "WanAttentionBlock.forward received unused kwargs: %s",
+                {k: type(v) for k, v in extra_kwargs.items()},
+            )
 
         if split_attn:
             seq_chunk_target = max(context.shape[0], clip_embed.shape[0] if clip_embed is not None else 0)
