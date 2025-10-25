@@ -142,8 +142,18 @@ def parse_structured_prompt(
     if not offsets_list:
         raise ValueError("Tokenizer offsets mapping is empty; ensure prompt was tokenized correctly.")
 
+    sample_item = offsets_list[0]
+    log.warning(
+        "offset mapping sample type=%s has_keys=%s repr=%r",
+        type(sample_item),
+        hasattr(sample_item, "keys"),
+        sample_item,
+    )
+
     def _normalize_offset_item(item: Union[Dict[str, int], Sequence[int]]) -> Tuple[int, int]:
         if isinstance(item, dict):
+            if hasattr(item, "get") and item.get("start") is not None and item.get("end") is not None:
+                return int(item["start"]), int(item["end"])
             if "start" in item and "end" in item:
                 return int(item["start"]), int(item["end"])
             unexpected_keys = list(item.keys())[:4]
