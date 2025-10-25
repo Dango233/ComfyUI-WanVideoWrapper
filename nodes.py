@@ -500,11 +500,16 @@ class WanVideoTextEncode:
 
         shot_positions = []
         if hasattr(encoder, "tokenizer"):
-            for prompt_text in positive_prompts:
+            for idx, prompt_text in enumerate(positive_prompts):
+                debug_excerpt = prompt_text.replace("\n", " ")[:160]
                 try:
                     positions = parse_structured_prompt(prompt_text, encoder.tokenizer)
+                    if positions is None:
+                        log.warning(f"Shot prompt parsing returned None for segment {idx}. Prompt excerpt: '{debug_excerpt}'")
+                    else:
+                        log.info(f"Shot prompt parsing succeeded for segment {idx}: global={positions.get('global')}, shots={positions.get('shots')}")
                 except Exception as exc:
-                    log.warning(f"Shot prompt parsing failed: {exc}")
+                    log.warning(f"Shot prompt parsing error for segment {idx}: {exc}. Prompt excerpt: '{debug_excerpt}'")
                     positions = None
                 shot_positions.append(positions)
         else:
