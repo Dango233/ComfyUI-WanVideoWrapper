@@ -122,12 +122,31 @@ def parse_structured_prompt(
         add_special_tokens=True,
     )
 
-    offsets = tokenized["offset_mapping"][0]
-    token_shot_ids = torch.full((len(offsets),), fill_value=-2, dtype=torch.long)
+    offsets_raw = tokenized["offset_mapping"]
+
+    if hasattr(offsets_raw, 'tolist'):
+        offsets_list = offsets_raw.tolist()
+    else:
+        offsets_list = offsets_raw
+
+    if not offsets_list:
+        raise ValueError('Tokenizer offsets mapping is empty; ensure prompt was tokenized correctly.')
+
+    if isinstance(offsets_list[0], (list, tuple)):
+        if len(offsets_list[0]) == 2 and isinstance(offsets_list[0][0], int):
+            offset_pairs = list(offsets_list)
+        elif isinstance(offsets_list[0], (list, tuple)) and len(offsets_list[0]) and isinstance(offsets_list[0][0], (list, tuple)) and len(offsets_list[0][0]) == 2:
+            offset_pairs = list(offsets_list[0])
+        else:
+            raise ValueError(f'Unexpected offsets mapping structure: {type(offsets_list[0])}')
+    else:
+        raise ValueError(f'Offsets mapping must be a list of pairs, got {type(offsets_list)}')
+
+    token_shot_ids = torch.full((len(offset_pairs),), fill_value=-2, dtype=torch.long)
 
     def assign(indices: Sequence[Tuple[int, int]], label: int):
         for span_start, span_end in indices:
-            for i, (tok_start, tok_end) in enumerate(offsets.tolist()):
+            for i, (tok_start, tok_end) in enumerate(offset_pairs):
                 if tok_start == tok_end:
                     continue  # special tokens
                 if tok_end <= span_start or tok_start >= span_end:
