@@ -1,9 +1,13 @@
+import logging
 import math
 import re
 from dataclasses import dataclass
-from typing import Dict, List, Optional, Sequence, Tuple
+from typing import Dict, Iterable, List, Optional, Sequence, Tuple, Union
 
 import torch
+
+
+log = logging.getLogger(__name__)
 
 
 LATENT_FRAME_STRIDE = 4
@@ -112,6 +116,12 @@ def parse_structured_prompt(
         tokenizer: HuggingfaceTokenizer instance used for Wan text encoding.
     """
     spans = _find_shot_char_spans(prompt)
+    shot_span_count = len(spans["shots"]) if spans["shots"] is not None else None
+    log.debug(
+        "parse_structured_prompt spans detected: global=%s, shots=%s",
+        spans["global"],
+        shot_span_count,
+    )
     if spans["global"] is None and spans["shots"] is None:
         return None
 
@@ -124,36 +134,68 @@ def parse_structured_prompt(
 
     offsets_raw = tokenized["offset_mapping"]
 
-    if hasattr(offsets_raw, 'tolist'):
+    if hasattr(offsets_raw, "tolist"):
         offsets_list = offsets_raw.tolist()
     else:
         offsets_list = offsets_raw
 
     if not offsets_list:
-        raise ValueError('Tokenizer offsets mapping is empty; ensure prompt was tokenized correctly.')
+        raise ValueError("Tokenizer offsets mapping is empty; ensure prompt was tokenized correctly.")
 
-    offset_pairs = None
-    first_elem = offsets_list[0]
+    def _normalize_offset_item(item: Union[Dict[str, int], Sequence[int]]) -> Tuple[int, int]:
+        if isinstance(item, dict):
+            if "start" in item and "end" in item:
+                return int(item["start"]), int(item["end"])
+            unexpected_keys = list(item.keys())[:4]
+            raise ValueError(f"Unexpected dict keys in offsets mapping: {unexpected_keys}")
+        if isinstance(item, (list, tuple)) and len(item) == 2:
+            try:
+                return int(item[0]), int(item[1])
+            except (TypeError, ValueError) as exc:
+                raise ValueError(f"Offset pair contains non-integer values: {item}") from exc
+        raise TypeError(f"Unsupported offset item type: {type(item)} -> {item}")
 
-    if isinstance(first_elem, (list, tuple)) and first_elem and isinstance(first_elem[0], (list, tuple, dict)):
-        first_elem = first_elem
+    def _flatten_offsets(struct: Iterable) -> List[Tuple[int, int]]:
+        result: List[Tuple[int, int]] = []
+        stack: List[Tuple[int, Iterable]] = [(0, struct)]
+        while stack:
+            depth, current = stack.pop()
+            if isinstance(current, dict) or (
+                isinstance(current, (list, tuple)) and len(current) == 2 and not any(isinstance(v, (list, tuple, dict)) for v in current)
+            ):
+                try:
+                    result.append(_normalize_offset_item(current))
+                except Exception as exc:
+                    log.debug("Failed to normalize offset item at depth %s: %r", depth, current)
+                    raise
+                continue
 
-    if isinstance(first_elem, dict):
-        if 'start' in first_elem and 'end' in first_elem:
-            offset_pairs = [(int(item['start']), int(item['end'])) for item in offsets_list]
-        else:
-            raise ValueError(f"Unexpected dict structure in offsets mapping: {first_elem}")
-    elif isinstance(first_elem, (list, tuple)):
-        if len(first_elem) == 2 and all(isinstance(v, int) for v in first_elem):
-            offset_pairs = [(int(a), int(b)) for a, b in offsets_list]
-        elif first_elem and isinstance(first_elem[0], (list, tuple)) and len(first_elem[0]) == 2:
-            offset_pairs = [(int(a), int(b)) for a, b in first_elem]
-        elif first_elem and isinstance(first_elem[0], dict) and 'start' in first_elem[0]:
-            offset_pairs = [(int(item['start']), int(item['end'])) for item in first_elem]
-        else:
-            raise ValueError(f"Unexpected list/tuple structure in offsets mapping: {first_elem}")
-    else:
-        raise ValueError(f"Offsets mapping must contain dicts or tuples, got {type(first_elem)}")
+            if isinstance(current, (list, tuple)):
+                for item in reversed(current):
+                    stack.append((depth + 1, item))
+            else:
+                raise TypeError(f"Unexpected offsets structure at depth {depth}: {type(current)} -> {current}")
+        return result
+
+    try:
+        offset_pairs = _flatten_offsets(offsets_list)
+    except Exception as exc:
+        sample = offsets_list[0] if isinstance(offsets_list, (list, tuple)) and offsets_list else offsets_list
+        log.error(
+            "Failed to flatten tokenizer offsets. raw_type=%s sample=%r",
+            type(offsets_list),
+            sample,
+        )
+        raise
+
+    if not offset_pairs:
+        raise ValueError("Tokenizer offsets mapping could not be flattened; got empty result.")
+
+    log.debug(
+        "Normalized %d token offsets (first 4 shown): %s",
+        len(offset_pairs),
+        offset_pairs[:4],
+    )
 
     token_shot_ids = torch.full((len(offset_pairs),), fill_value=-2, dtype=torch.long)
 
