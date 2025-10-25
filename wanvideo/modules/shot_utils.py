@@ -117,7 +117,7 @@ def parse_structured_prompt(
     """
     spans = _find_shot_char_spans(prompt)
     shot_span_count = len(spans["shots"]) if spans["shots"] is not None else None
-    log.debug(
+    log.warning(
         "parse_structured_prompt spans detected: global=%s, shots=%s",
         spans["global"],
         shot_span_count,
@@ -166,7 +166,7 @@ def parse_structured_prompt(
                 try:
                     result.append(_normalize_offset_item(current))
                 except Exception as exc:
-                    log.debug("Failed to normalize offset item at depth %s: %r", depth, current)
+                    log.warning("Failed to normalize offset item at depth %s: %r", depth, current)
                     raise
                 continue
 
@@ -191,7 +191,7 @@ def parse_structured_prompt(
     if not offset_pairs:
         raise ValueError("Tokenizer offsets mapping could not be flattened; got empty result.")
 
-    log.debug(
+    log.warning(
         "Normalized %d token offsets (first 4 shown): %s",
         len(offset_pairs),
         offset_pairs[:4],
