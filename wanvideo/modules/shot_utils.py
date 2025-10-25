@@ -125,18 +125,25 @@ def parse_structured_prompt(
     if spans["global"] is None and spans["shots"] is None:
         return None
 
-    hf_tokenizer = getattr(tokenizer, "tokenizer", None)
+    hf_tokenizer = getattr(tokenizer, "tokenizer", tokenizer)
     fast_flag = getattr(hf_tokenizer, "is_fast", None)
     print(
         f"[ShotUtils] tokenizer type={type(tokenizer)} backend={type(hf_tokenizer)} is_fast={fast_flag}"
     )
 
-    tokenized = tokenizer(
-        prompt,
-        return_mask=True,
-        return_offsets_mapping=True,
-        add_special_tokens=True,
-    )
+    try:
+        tokenized = hf_tokenizer(
+            [prompt],
+            return_offsets_mapping=True,
+            add_special_tokens=True,
+            padding=False,
+        )
+    except TypeError:
+        tokenized = hf_tokenizer(
+            prompt,
+            return_offsets_mapping=True,
+            add_special_tokens=True,
+        )
 
     offset_pairs: List[Tuple[int, int]] = []
     offset_source = "encodings"
