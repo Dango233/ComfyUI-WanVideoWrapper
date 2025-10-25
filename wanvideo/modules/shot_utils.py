@@ -132,15 +132,28 @@ def parse_structured_prompt(
     if not offsets_list:
         raise ValueError('Tokenizer offsets mapping is empty; ensure prompt was tokenized correctly.')
 
-    if isinstance(offsets_list[0], (list, tuple)):
-        if len(offsets_list[0]) == 2 and isinstance(offsets_list[0][0], int):
-            offset_pairs = list(offsets_list)
-        elif isinstance(offsets_list[0], (list, tuple)) and len(offsets_list[0]) and isinstance(offsets_list[0][0], (list, tuple)) and len(offsets_list[0][0]) == 2:
-            offset_pairs = list(offsets_list[0])
+    offset_pairs = None
+    first_elem = offsets_list[0]
+
+    if isinstance(first_elem, (list, tuple)) and first_elem and isinstance(first_elem[0], (list, tuple, dict)):
+        first_elem = first_elem
+
+    if isinstance(first_elem, dict):
+        if 'start' in first_elem and 'end' in first_elem:
+            offset_pairs = [(int(item['start']), int(item['end'])) for item in offsets_list]
         else:
-            raise ValueError(f'Unexpected offsets mapping structure: {type(offsets_list[0])}')
+            raise ValueError(f"Unexpected dict structure in offsets mapping: {first_elem}")
+    elif isinstance(first_elem, (list, tuple)):
+        if len(first_elem) == 2 and all(isinstance(v, int) for v in first_elem):
+            offset_pairs = [(int(a), int(b)) for a, b in offsets_list]
+        elif first_elem and isinstance(first_elem[0], (list, tuple)) and len(first_elem[0]) == 2:
+            offset_pairs = [(int(a), int(b)) for a, b in first_elem]
+        elif first_elem and isinstance(first_elem[0], dict) and 'start' in first_elem[0]:
+            offset_pairs = [(int(item['start']), int(item['end'])) for item in first_elem]
+        else:
+            raise ValueError(f"Unexpected list/tuple structure in offsets mapping: {first_elem}")
     else:
-        raise ValueError(f'Offsets mapping must be a list of pairs, got {type(offsets_list)}')
+        raise ValueError(f"Offsets mapping must contain dicts or tuples, got {type(first_elem)}")
 
     token_shot_ids = torch.full((len(offset_pairs),), fill_value=-2, dtype=torch.long)
 
