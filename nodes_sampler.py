@@ -145,7 +145,6 @@ class WanVideoSampler:
                 "multitalk_embeds": ("MULTITALK_EMBEDS", ),
                 "freeinit_args": ("FREEINITARGS", ),
                 "shot_args": ("SHOTARGS", ),
-                "shot_attention_options": ("SHOTATTENTION", ),
                 "start_step": ("INT", {"default": 0, "min": 0, "max": 10000, "step": 1, "tooltip": "Start step for the sampling, 0 means full sampling, otherwise samples only from this step"}),
                 "end_step": ("INT", {"default": -1, "min": -1, "max": 10000, "step": 1, "tooltip": "End step for the sampling, -1 means full sampling, otherwise samples only until this step"}),
                 "add_noise_to_samples": ("BOOLEAN", {"default": False, "tooltip": "Add noise to the samples before sampling, needed for video2video sampling when starting from clean video"}),
@@ -161,7 +160,7 @@ class WanVideoSampler:
         force_offload=True, samples=None, feta_args=None, denoise_strength=1.0, context_options=None,
         cache_args=None, teacache_args=None, flowedit_args=None, batched_cfg=False, slg_args=None, rope_function="default", loop_args=None,
         experimental_args=None, sigmas=None, unianimate_poses=None, fantasytalking_embeds=None, uni3c_embeds=None, multitalk_embeds=None, freeinit_args=None,
-        shot_args=None, shot_attention_options=None, start_step=0, end_step=-1, add_noise_to_samples=False):
+        shot_args=None, start_step=0, end_step=-1, add_noise_to_samples=False):
 
         patcher = model
         model = model.model
@@ -182,28 +181,20 @@ class WanVideoSampler:
         model_shot_cfg = transformer_options.get("shot_attention") if transformer_options is not None else None
         model_shot_enabled = bool(model_shot_cfg and model_shot_cfg.get("enabled", False))
 
-        options_connected = shot_attention_options is not None
-        options_enabled = bool(shot_attention_options.get("enabled", True)) if options_connected else False
         args_present = shot_args is not None
 
         if model_shot_enabled:
             if not args_present:
-                raise ValueError("已在模型加载阶段启用 Shot Attention，但采样时缺少 WanVideoShotArgs。请补齐节点或全部关闭。")
-            if options_connected and not options_enabled:
-                raise ValueError("WanVideoShotAttentionOptions 已连接却关闭 enable。请保持所有 Shot Attention 节点一致开启或一致关闭。")
+                raise ValueError("Shot attention was enabled during model load, but WanVideoShotArgs node is missing.")
         else:
             if args_present:
-                raise ValueError("检测到 WanVideoShotArgs，但模型未通过 WanVideoSetShotAttention 启用 Shot Attention。")
-            if options_connected and options_enabled:
-                raise ValueError("WanVideoShotAttentionOptions 启用了 Shot Attention，但模型未配置。请先在模型加载阶段开启。")
+                raise ValueError("WanVideoShotArgs detected, but shot attention was not enabled in WanVideoSetShotAttention.")
 
         if not model_shot_enabled:
             shot_attention_cfg = None
             shot_mask_type = None
         else:
             shot_attention_cfg = dict(model_shot_cfg)
-            if options_connected:
-                shot_attention_cfg.update(shot_attention_options)
             shot_attention_cfg.setdefault("enabled", True)
             shot_attention_cfg.setdefault("mode", "firstk")
             shot_attention_cfg.setdefault("mask_type", "none")

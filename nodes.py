@@ -220,36 +220,6 @@ class WanVideoSetShotAttention:
         return (patcher,)
 
 
-class WanVideoShotAttentionOptions:
-    @classmethod
-    def INPUT_TYPES(s):
-        return {
-            "required": {
-                "enable": ("BOOLEAN", {"default": True}),
-                "global_tokens": ("INT", {"default": 64, "min": 0, "max": 512, "step": 1}),
-            },
-            "optional": {
-                "pooling_mode": (["firstk", "linspace", "mean"], {"default": "firstk"}),
-                "mask_type": (["none", "normalized", "alternating"], {"default": "none"}),
-                "backend": (["auto", "flash", "dense", "full"], {"default": "auto"}),
-            }
-        }
-
-    RETURN_TYPES = ("SHOTATTENTION",)
-    RETURN_NAMES = ("shot_attention_options",)
-    FUNCTION = "create"
-    CATEGORY = "WanVideoWrapper"
-
-    def create(self, enable, global_tokens, pooling_mode="firstk", mask_type="none", backend="auto"):
-        return ({
-            "enabled": bool(enable),
-            "global_tokens": int(global_tokens),
-            "mode": pooling_mode,
-            "mask_type": mask_type,
-            "backend": backend,
-        },)
-
-
 # In-memory cache for prompt extender output
 _extender_cache = {}
 
@@ -2315,7 +2285,6 @@ NODE_CLASS_MAPPINGS = {
     "WanVideoBlockList": WanVideoBlockList,
     "WanVideoShotArgs": WanVideoShotArgs,
     "WanVideoSetShotAttention": WanVideoSetShotAttention,
-    "WanVideoShotAttentionOptions": WanVideoShotAttentionOptions,
     "WanVideoTextEncodeCached": WanVideoTextEncodeCached,
     "WanVideoAddExtraLatent": WanVideoAddExtraLatent,
     "WanVideoScheduler": WanVideoScheduler,
@@ -2358,7 +2327,6 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "WanVideoBlockList": "WanVideo Block List",
     "WanVideoShotArgs": "WanVideo Shot Args",
     "WanVideoSetShotAttention": "WanVideo Set Shot Attention",
-    "WanVideoShotAttentionOptions": "WanVideo Shot Attention Options",
     "WanVideoTextEncodeCached": "WanVideo TextEncode Cached",
     "WanVideoAddExtraLatent": "WanVideo Add Extra Latent",
     "WanVideoAddStandInLatent": "WanVideo Add StandIn Latent",

@@ -117,8 +117,8 @@ def parse_structured_prompt(
     """
     spans = _find_shot_char_spans(prompt)
     shot_span_count = len(spans["shots"]) if spans["shots"] is not None else None
-    log.warning(
-        "parse_structured_prompt spans detected: global=%s, shots=%s",
+    log.debug(
+        "Structured prompt spans detected: global=%s, shots=%s",
         spans["global"],
         shot_span_count,
     )
@@ -127,8 +127,11 @@ def parse_structured_prompt(
 
     hf_tokenizer = getattr(tokenizer, "tokenizer", tokenizer)
     fast_flag = getattr(hf_tokenizer, "is_fast", None)
-    print(
-        f"[ShotUtils] tokenizer type={type(tokenizer)} backend={type(hf_tokenizer)} is_fast={fast_flag}"
+    log.debug(
+        "Tokenizer info: wrapper=%s backend=%s is_fast=%s",
+        type(tokenizer),
+        type(hf_tokenizer),
+        fast_flag,
     )
 
     try:
@@ -153,7 +156,7 @@ def parse_structured_prompt(
         for enc_idx, enc in enumerate(encodings):
             offsets = getattr(enc, "offsets", None)
             if offsets is None:
-                print(f"[ShotUtils] encodings[{enc_idx}] missing offsets attribute, type={type(enc)}")
+                log.debug("Encoding %d missing offsets attribute (type=%s)", enc_idx, type(enc))
                 continue
             for pair_idx, pair in enumerate(offsets):
                 start: Optional[int] = None
@@ -171,11 +174,20 @@ def parse_structured_prompt(
                         raise TypeError("offset pair missing start/end")
                     offset_pairs.append((int(start), int(end)))
                 except Exception as exc:
-                    print(
-                        f"[ShotUtils] encodings[{enc_idx}].offsets[{pair_idx}] failed to normalize: type={type(pair)} repr={pair} err={exc}"
+                    log.debug(
+                        "Failed to normalize encoding[%d].offsets[%d]: type=%s repr=%r err=%s",
+                        enc_idx,
+                        pair_idx,
+                        type(pair),
+                        pair,
+                        exc,
                     )
         if offset_pairs:
-            print(f"[ShotUtils] offsets extracted via encodings: count={len(offset_pairs)} sample={offset_pairs[:4]}")
+            log.debug(
+                "Extracted %d offsets via encodings (sample=%s)",
+                len(offset_pairs),
+                offset_pairs[:4],
+            )
 
     if not offset_pairs:
         offset_source = "offset_mapping"
@@ -185,22 +197,22 @@ def parse_structured_prompt(
             offsets_raw = getattr(tokenized, "offset_mapping", None)
 
         sample_repr = offsets_raw if isinstance(offsets_raw, (list, tuple, dict)) else type(offsets_raw)
-        print(f"[ShotUtils] raw offset_mapping type={type(offsets_raw)} sample={sample_repr}")
+        log.debug("offset_mapping raw type=%s sample=%s", type(offsets_raw), sample_repr)
 
         def _collect(node: Any, depth: int = 0) -> None:
             prefix = f"[ShotUtils] flatten depth={depth}"
             if node is None:
-                print(f"{prefix} encountered None")
+                log.debug("%s encountered None", prefix)
                 return
             if hasattr(node, "tolist"):
                 node = node.tolist()
-                print(f"{prefix} tolist() -> {type(node)}")
+                log.debug("%s tolist() -> %s", prefix, type(node))
             if isinstance(node, dict):
                 if "start" in node and "end" in node:
                     offset_pairs.append((int(node["start"]), int(node["end"])) )
                     return
                 for key, value in node.items():
-                    print(f"{prefix} visiting key={key} type={type(value)}")
+                    log.debug("%s visiting key=%s type=%s", prefix, key, type(value))
                     _collect(value, depth + 1)
                 return
             if hasattr(node, "start") and hasattr(node, "end"):
@@ -211,19 +223,22 @@ def parse_structured_prompt(
                     offset_pairs.append((int(node[0]), int(node[1])))
                     return
                 head_type = type(node[0]) if len(node) > 0 else None
-                print(f"{prefix} iterating {len(node)} items, head_type={head_type}")
+                log.debug("%s iterating %d items, head_type=%s", prefix, len(node), head_type)
                 for item in node:
                     _collect(item, depth + 1)
                 return
-            print(f"{prefix} unsupported type={type(node)} repr={node}")
+            log.debug("%s unsupported type=%s repr=%r", prefix, type(node), node)
 
         _collect(offsets_raw)
 
     if not offset_pairs:
         raise ValueError("Tokenizer offsets mapping could not be flattened; got empty result.")
 
-    print(
-        f"[ShotUtils] normalized offset count={len(offset_pairs)} source={offset_source} sample={offset_pairs[:4]}"
+    log.debug(
+        "Normalized offset count=%d source=%s sample=%s",
+        len(offset_pairs),
+        offset_source,
+        offset_pairs[:4],
     )
 
     token_shot_ids = torch.full((len(offset_pairs),), fill_value=-2, dtype=torch.long)

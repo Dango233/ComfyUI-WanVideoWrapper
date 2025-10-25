@@ -2494,9 +2494,9 @@ class WanModel(torch.nn.Module):
         shot_mode = shot_attention_cfg.get("mode", "firstk") if shot_attention_enabled else "firstk"
         if shot_attention_enabled:
             if shot_backend != "full" and shot_global_tokens <= 0:
-                raise ValueError("Shot Attention 已启用，但 global_tokens ≤ 0。请在 WanVideoSetShotAttention 或 WanVideoShotAttentionOptions 中设置正数。")
+                raise ValueError("Shot attention is enabled but global_tokens is ≤ 0. Set a positive value in WanVideoSetShotAttention.")
             if shot_indices is None:
-                raise ValueError("Shot Attention 已启用，但未收到 shot_indices。请检查采样链路传递的 WanVideoShotArgs。")
+                raise ValueError("Shot attention is enabled but shot_indices are missing. Check the WanVideoShotArgs wiring.")
             if isinstance(shot_indices, torch.Tensor):
                 shot_indices_tensor = shot_indices.to(device=device, dtype=torch.long)
             else:
@@ -2505,7 +2505,7 @@ class WanModel(torch.nn.Module):
                 shot_indices_tensor = shot_indices_tensor.unsqueeze(0)
         else:
             if shot_indices is not None:
-                raise ValueError("检测到 shot_indices，但模型未启用 Shot Attention。请保持节点一致。")
+                raise ValueError("shot_indices were provided but shot attention is disabled. Make sure all nodes agree on the mode.")
             shot_indices_tensor = None
 
         shot_block_config = None
@@ -2519,7 +2519,7 @@ class WanModel(torch.nn.Module):
         elif isinstance(text_cut_positions, dict):
             shot_positions = text_cut_positions
         if shot_attention_enabled and (not shot_positions or shot_positions.get("global") is None):
-            raise ValueError("Shot Attention 已启用，但缺少结构化提示位置。请确认 prompt 含 [global caption]/[per shot caption]/[shot cut] 标签。")
+            raise ValueError("Shot attention is enabled but structured prompt positions are missing. Ensure the prompt includes [global caption]/[per shot caption]/[shot cut] tags.")
 
         if freqs is not None and freqs.device != device:
            freqs = freqs.to(device)
@@ -2586,11 +2586,11 @@ class WanModel(torch.nn.Module):
             if shot_indices_tensor.shape[0] == 1 and batch_latents > 1:
                 shot_indices_tensor = shot_indices_tensor.repeat(batch_latents, 1)
             if shot_indices_tensor.shape[0] != batch_latents:
-                raise ValueError("Shot Attention: shot_indices 批大小与 latent 批次不一致。")
+                raise ValueError("Shot attention: shot_indices batch size does not match the latent batch size.")
 
             latent_frames = grid_sizes[0][0].item()
             if shot_indices_tensor.shape[1] != latent_frames:
-                raise ValueError("Shot Attention: shot_indices 长度与 latent 帧数不匹配。")
+                raise ValueError("Shot attention: shot_indices length does not match the latent frame count.")
 
             spatial_tokens = int(grid_sizes[0][1].item() * grid_sizes[0][2].item())
             shot_token_labels = shot_indices_tensor.repeat_interleave(spatial_tokens, dim=1)
@@ -2866,7 +2866,7 @@ class WanModel(torch.nn.Module):
                     dtype=x[0].dtype,
                 )
             except Exception as exc:
-                raise ValueError(f"Shot Attention 构建跨注意力 mask 失败: {exc}") from exc
+                raise ValueError(f"Failed to build cross-attention mask for shot attention: {exc}") from exc
 
         # MultiTalk
         if multitalk_audio is not None:
