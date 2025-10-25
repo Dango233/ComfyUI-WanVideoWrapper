@@ -1,10 +1,14 @@
 # Copyright 2024-2025 The Alibaba Wan Team Authors. All rights reserved.
 import torch
+import torch.nn.functional as F
 from typing import List, Sequence
 
 from einops import rearrange
 
 from ...utils import log
+
+
+_VARLEN_FALLBACK_WARNED = False
 
 # Flash Attention imports
 try:
@@ -246,12 +250,14 @@ def attention(
         return sageattn_func(q, k, v, tensor_layout="NHD").contiguous()
 
 
-def _get_flash_attn_varlen():
+def _get_flash_attn_varlen(required: bool = True):
     if FLASH_ATTN_3_AVAILABLE:
         return flash_attn_interface.flash_attn_varlen_func
     if FLASH_ATTN_2_AVAILABLE:
         return flash_attn.flash_attn_varlen_func
-    raise RuntimeError("flash-attn varlen kernel is required for sparse shot attention")
+    if required:
+        raise RuntimeError("flash-attn varlen kernel is required for sparse shot attention")
+    return None
 
 
 def _build_global_reps(
@@ -299,17 +305,41 @@ def sparse_shot_attention(
     per_g: int = 64,
     mode: str = "firstk",
     causal: bool = False,
+    backend: str = "auto",
 ):
-    """Shot-aware varlen attention with lightweight global token pooling."""
+    """Shot-aware attention with optional varlen flash kernels or dense fallback."""
     if q.shape != k.shape or q.shape != v.shape:
         raise ValueError("q, k, v must share the same shape")
+
+    backend = (backend or "auto").lower()
+
+    require_flash = backend == "flash"
+    use_flash = backend in ("auto", "flash")
+    varlen_attn = _get_flash_attn_varlen(required=require_flash) if use_flash else None
+
+    if varlen_attn is None and backend == "flash":
+        raise RuntimeError("flash-attn varlen kernel is required for sparse shot attention")
+
+    if varlen_attn is None:
+        global _VARLEN_FALLBACK_WARNED
+        if not _VARLEN_FALLBACK_WARNED:
+            log.warning("Shot attention falling back to dense backend; flash varlen kernel not available.")
+            _VARLEN_FALLBACK_WARNED = True
+        return _sparse_shot_attention_dense(
+            q,
+            k,
+            v,
+            shot_latent_indices=shot_latent_indices,
+            per_g=per_g,
+            mode=mode,
+            causal=causal,
+        )
 
     batch, seqlen, heads, head_dim = q.shape
     q = rearrange(q, "b s h d -> b h s d").contiguous()
     k = rearrange(k, "b s h d -> b h s d").contiguous()
     v = rearrange(v, "b s h d -> b h s d").contiguous()
 
-    varlen_attn = _get_flash_attn_varlen()
     outputs = []
 
     for b_idx in range(batch):
@@ -369,6 +399,66 @@ def sparse_shot_attention(
             out_chunks.append(out_packed[start:end])
         out_local = torch.cat(out_chunks, dim=0)
         outputs.append(rearrange(out_local, "s h d -> h s d"))
+
+    stacked = torch.stack(outputs, dim=0)
+    return rearrange(stacked, "b h s d -> b s h d")
+
+
+def _sparse_shot_attention_dense(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    shot_latent_indices: Sequence[Sequence[int]],
+    per_g: int,
+    mode: str,
+    causal: bool,
+):
+    batch, seqlen, heads, head_dim = q.shape
+    q_bhg = rearrange(q, "b s h d -> b h s d").contiguous()
+    k_bhg = rearrange(k, "b s h d -> b h s d").contiguous()
+    v_bhg = rearrange(v, "b s h d -> b h s d").contiguous()
+
+    outputs = []
+
+    for b_idx in range(batch):
+        cuts = list(shot_latent_indices[b_idx])
+        if not cuts or cuts[0] != 0 or cuts[-1] != seqlen:
+            raise ValueError("shot_latent_indices must start at 0 and end at sequence length")
+
+        q_shots = [q_bhg[b_idx, :, start:end, :] for start, end in zip(cuts[:-1], cuts[1:])]
+        k_shots = [k_bhg[b_idx, :, start:end, :] for start, end in zip(cuts[:-1], cuts[1:])]
+        v_shots = [v_bhg[b_idx, :, start:end, :] for start, end in zip(cuts[:-1], cuts[1:])]
+
+        q_locals = [rearrange(qi, "h s d -> s h d") for qi in q_shots]
+        k_locals = [rearrange(ki, "h s d -> s h d") for ki in k_shots]
+        v_locals = [rearrange(vi, "h s d -> s h d") for vi in v_shots]
+
+        k_global, v_global = _build_global_reps(k_locals, v_locals, per_g, mode)
+
+        out_locals = []
+        for k_local, v_local, q_local in zip(k_locals, v_locals, q_locals):
+            if k_global.numel() > 0:
+                k_cat = torch.cat([k_local, k_global], dim=0)
+                v_cat = torch.cat([v_local, v_global], dim=0)
+            else:
+                k_cat = k_local
+                v_cat = v_local
+
+            q_sdpa = q_local.permute(1, 0, 2).unsqueeze(0)
+            k_sdpa = k_cat.permute(1, 0, 2).unsqueeze(0)
+            v_sdpa = v_cat.permute(1, 0, 2).unsqueeze(0)
+
+            attn_out = F.scaled_dot_product_attention(
+                q_sdpa,
+                k_sdpa,
+                v_sdpa,
+                is_causal=causal,
+            )
+
+            out_locals.append(attn_out.squeeze(0).permute(1, 0, 2))
+
+        out_cat = torch.cat(out_locals, dim=0)
+        outputs.append(rearrange(out_cat, "s h d -> h s d"))
 
     stacked = torch.stack(outputs, dim=0)
     return rearrange(stacked, "b h s d -> b s h d")
