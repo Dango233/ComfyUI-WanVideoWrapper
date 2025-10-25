@@ -516,7 +516,11 @@ class WanSelfAttention(nn.Module):
             indices = shot_config.get("indices")
             per_g = shot_config.get("global_tokens", 0)
             mode = shot_config.get("mode", "firstk")
-            if indices is not None and per_g > 0:
+            backend = (shot_config.get("backend") or "auto") if shot_config else "auto"
+            backend = backend.lower()
+            if backend == "full":
+                use_shot_attention = False
+            elif indices is not None and per_g > 0:
                 x = sparse_shot_attention(
                     q,
                     k,
@@ -525,6 +529,7 @@ class WanSelfAttention(nn.Module):
                     num_heads=self.num_heads,
                     per_g=per_g,
                     mode=mode,
+                    backend=backend,
                 )
                 use_shot_attention = True
 
@@ -2483,10 +2488,11 @@ class WanModel(torch.nn.Module):
         device = self.main_device
 
         shot_attention_enabled = bool(shot_attention_cfg and shot_attention_cfg.get("enabled", False))
+        shot_backend = (shot_attention_cfg.get("backend", "auto") if shot_attention_enabled else "auto").lower()
         shot_global_tokens = int(shot_attention_cfg.get("global_tokens", 0)) if shot_attention_enabled else 0
         shot_mode = shot_attention_cfg.get("mode", "firstk") if shot_attention_enabled else "firstk"
         if shot_attention_enabled:
-            if shot_global_tokens <= 0:
+            if shot_backend != "full" and shot_global_tokens <= 0:
                 raise ValueError("Shot Attention 已启用，但 global_tokens ≤ 0。请在 WanVideoSetShotAttention 或 WanVideoShotAttentionOptions 中设置正数。")
             if shot_indices is None:
                 raise ValueError("Shot Attention 已启用，但未收到 shot_indices。请检查采样链路传递的 WanVideoShotArgs。")
@@ -2592,6 +2598,7 @@ class WanModel(torch.nn.Module):
                 "indices": shot_latent_cuts,
                 "global_tokens": shot_global_tokens,
                 "mode": shot_mode,
+                "backend": shot_backend,
             }
 
         x = [u.flatten(2).transpose(1, 2) for u in x]
