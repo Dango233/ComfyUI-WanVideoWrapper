@@ -2,8 +2,7 @@ import logging
 import math
 import re
 from dataclasses import dataclass
-from collections.abc import Iterable as IterableABC
-from typing import Any, Dict, Iterable, Iterator, List, Optional, Sequence, Tuple, Union
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import torch
 
@@ -133,102 +132,85 @@ def parse_structured_prompt(
         add_special_tokens=True,
     )
 
-    offsets_raw = tokenized["offset_mapping"]
+    offset_pairs: List[Tuple[int, int]] = []
+    offset_source = "encodings"
 
-    if isinstance(offsets_raw, dict):
-        offsets_iterable = offsets_raw.values()
-    elif hasattr(offsets_raw, "tolist"):
-        offsets_iterable = offsets_raw.tolist()
-    else:
-        offsets_iterable = offsets_raw
+    encodings = getattr(tokenized, "encodings", None)
+    if encodings:
+        for enc_idx, enc in enumerate(encodings):
+            offsets = getattr(enc, "offsets", None)
+            if offsets is None:
+                print(f"[ShotUtils] encodings[{enc_idx}] missing offsets attribute, type={type(enc)}")
+                continue
+            for pair_idx, pair in enumerate(offsets):
+                start: Optional[int] = None
+                end: Optional[int] = None
+                try:
+                    if isinstance(pair, dict):
+                        start = pair.get("start")
+                        end = pair.get("end")
+                    elif hasattr(pair, "start") and hasattr(pair, "end"):
+                        start = getattr(pair, "start")
+                        end = getattr(pair, "end")
+                    elif isinstance(pair, (list, tuple)) and len(pair) == 2:
+                        start, end = pair
+                    if start is None or end is None:
+                        raise TypeError("offset pair missing start/end")
+                    offset_pairs.append((int(start), int(end)))
+                except Exception as exc:
+                    print(
+                        f"[ShotUtils] encodings[{enc_idx}].offsets[{pair_idx}] failed to normalize: type={type(pair)} repr={pair} err={exc}"
+                    )
+        if offset_pairs:
+            print(f"[ShotUtils] offsets extracted via encodings: count={len(offset_pairs)} sample={offset_pairs[:4]}")
 
-    def _ensure_iterable(obj: Any) -> Iterable:
-        if isinstance(obj, str):
-            return []
-        if isinstance(obj, IterableABC):
-            return obj
-        if hasattr(obj, "__iter__"):
-            return obj
-        return []
+    if not offset_pairs:
+        offset_source = "offset_mapping"
+        if isinstance(tokenized, dict):
+            offsets_raw = tokenized.get("offset_mapping")
+        else:
+            offsets_raw = getattr(tokenized, "offset_mapping", None)
 
-    try:
-        offsets_list = list(offsets_iterable)
-    except TypeError:
-        offsets_list = [offsets_iterable]
+        sample_repr = offsets_raw if isinstance(offsets_raw, (list, tuple, dict)) else type(offsets_raw)
+        print(f"[ShotUtils] raw offset_mapping type={type(offsets_raw)} sample={sample_repr}")
 
-    if not offsets_list:
-        raise ValueError("Tokenizer offsets mapping is empty; ensure prompt was tokenized correctly.")
+        def _collect(node: Any, depth: int = 0) -> None:
+            prefix = f"[ShotUtils] flatten depth={depth}"
+            if node is None:
+                print(f"{prefix} encountered None")
+                return
+            if hasattr(node, "tolist"):
+                node = node.tolist()
+                print(f"{prefix} tolist() -> {type(node)}")
+            if isinstance(node, dict):
+                if "start" in node and "end" in node:
+                    offset_pairs.append((int(node["start"]), int(node["end"])) )
+                    return
+                for key, value in node.items():
+                    print(f"{prefix} visiting key={key} type={type(value)}")
+                    _collect(value, depth + 1)
+                return
+            if hasattr(node, "start") and hasattr(node, "end"):
+                offset_pairs.append((int(getattr(node, "start")), int(getattr(node, "end"))))
+                return
+            if isinstance(node, (list, tuple)):
+                if len(node) == 2 and all(isinstance(v, (int, float)) for v in node):
+                    offset_pairs.append((int(node[0]), int(node[1])))
+                    return
+                head_type = type(node[0]) if len(node) > 0 else None
+                print(f"{prefix} iterating {len(node)} items, head_type={head_type}")
+                for item in node:
+                    _collect(item, depth + 1)
+                return
+            print(f"{prefix} unsupported type={type(node)} repr={node}")
 
-    first_item = offsets_list[0]
-    log.warning(
-        "offset mapping container=%s sample=%s repr=%r",
-        type(offsets_iterable),
-        type(first_item),
-        first_item,
-    )
-
-    def _normalize_offset_item(item: Any) -> Tuple[int, int]:
-        if item is None:
-            raise TypeError("Offset item is None")
-        if isinstance(item, dict):
-            if "start" in item and "end" in item:
-                return int(item["start"]), int(item["end"])
-            if hasattr(item, "get") and item.get("start") is not None and item.get("end") is not None:
-                return int(item.get("start")), int(item.get("end"))
-            unexpected_keys = list(item.keys())[:4]
-            raise ValueError(f"Unexpected dict keys in offsets mapping: {unexpected_keys}")
-        if hasattr(item, "start") and hasattr(item, "end"):
-            return int(getattr(item, "start")), int(getattr(item, "end"))
-        if isinstance(item, (list, tuple)) and len(item) == 2:
-            return int(item[0]), int(item[1])
-        raise TypeError(f"Unsupported offset item type: {type(item)} -> {item}")
-
-    def _iter_offsets(node: Any, depth: int = 0) -> Iterator[Tuple[int, int]]:
-        if node is None:
-            return
-        try:
-            yield _normalize_offset_item(node)
-            return
-        except TypeError:
-            pass
-        except ValueError:
-            pass
-
-        if isinstance(node, dict):
-            for key, value in node.items():
-                log.warning("descending into dict key=%s depth=%d", key, depth)
-                yield from _iter_offsets(value, depth + 1)
-            return
-
-        if isinstance(node, (list, tuple)):
-            for item in node:
-                yield from _iter_offsets(item, depth + 1)
-            return
-
-        if hasattr(node, "__iter__") and not isinstance(node, str):
-            for item in node:
-                yield from _iter_offsets(item, depth + 1)
-            return
-
-        raise TypeError(f"Unexpected offsets structure at depth {depth}: {type(node)} -> {node}")
-
-    try:
-        offset_pairs = list(_iter_offsets(offsets_list))
-    except Exception:
-        log.exception(
-            "Failed to flatten tokenizer offsets. raw_type=%s sample_types=%s",
-            type(offsets_raw),
-            {type(x) for x in offsets_list[:4]},
-        )
-        raise
+        _collect(offsets_raw)
 
     if not offset_pairs:
         raise ValueError("Tokenizer offsets mapping could not be flattened; got empty result.")
 
-    log.warning(
-        "Normalized %d token offsets (first 4 shown): %s",
-        len(offset_pairs),
-        offset_pairs[:4],
+    print(
+        f"[ShotUtils] normalized offset count={len(offset_pairs)} source={offset_source} sample={offset_pairs[:4]}"
     )
 
     token_shot_ids = torch.full((len(offset_pairs),), fill_value=-2, dtype=torch.long)
