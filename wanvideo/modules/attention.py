@@ -1,6 +1,5 @@
 # Copyright 2024-2025 The Alibaba Wan Team Authors. All rights reserved.
 import torch
-import torch.nn.functional as F
 from typing import List, Sequence
 
 from einops import rearrange
@@ -308,25 +307,32 @@ def sparse_shot_attention(
     mode: str = "firstk",
     causal: bool = False,
     backend: str = "auto",
+    attention_mode: str = "sdpa",
 ):
     """Shot-aware attention with optional varlen flash kernels or dense fallback."""
     if q.shape != k.shape or q.shape != v.shape:
         raise ValueError("q, k, v must share the same shape")
 
     backend = (backend or "auto").lower()
+    attn_mode_effective = (attention_mode or "sdpa")
 
-    require_flash = backend == "flash"
-    use_flash = backend in ("auto", "flash")
-    varlen_attn = _get_flash_attn_varlen(required=require_flash) if use_flash else None
+    if backend == "auto":
+        backend = "flash" if attn_mode_effective.startswith("flash") else "dense"
 
-    if varlen_attn is None and backend == "flash":
-        raise RuntimeError("flash-attn varlen kernel is required for sparse shot attention")
+    varlen_attn = None
+    if backend == "flash":
+        varlen_attn = _get_flash_attn_varlen(required=False)
+        if varlen_attn is None:
+            global _VARLEN_FALLBACK_WARNED
+            if not _VARLEN_FALLBACK_WARNED:
+                log.warning(
+                    "Shot attention requested flash backend but flash varlen kernel not available; using %s instead.",
+                    attn_mode_effective,
+                )
+                _VARLEN_FALLBACK_WARNED = True
+            backend = "dense"
 
-    if varlen_attn is None:
-        global _VARLEN_FALLBACK_WARNED
-        if not _VARLEN_FALLBACK_WARNED:
-            log.warning("Shot attention falling back to dense backend; flash varlen kernel not available.")
-            _VARLEN_FALLBACK_WARNED = True
+    if backend != "flash":
         return _sparse_shot_attention_dense(
             q,
             k,
@@ -335,7 +341,11 @@ def sparse_shot_attention(
             per_g=per_g,
             mode=mode,
             causal=causal,
+            attention_mode=attn_mode_effective,
         )
+
+    if varlen_attn is None:
+        raise RuntimeError("flash-attn varlen kernel is required for sparse shot attention")
 
     batch, seqlen, heads, head_dim = q.shape
     q = rearrange(q, "b s h d -> b h s d").contiguous()
@@ -414,6 +424,7 @@ def _sparse_shot_attention_dense(
     per_g: int,
     mode: str,
     causal: bool,
+    attention_mode: str,
 ):
     batch, seqlen, heads, head_dim = q.shape
     q_bhg = rearrange(q, "b s h d -> b h s d").contiguous()
@@ -446,18 +457,20 @@ def _sparse_shot_attention_dense(
                 k_cat = k_local
                 v_cat = v_local
 
-            q_sdpa = q_local.permute(1, 0, 2).unsqueeze(0)
-            k_sdpa = k_cat.permute(1, 0, 2).unsqueeze(0)
-            v_sdpa = v_cat.permute(1, 0, 2).unsqueeze(0)
+            q_chunk = rearrange(q_local, "s h d -> 1 s h d")
+            k_chunk = rearrange(k_cat, "s h d -> 1 s h d")
+            v_chunk = rearrange(v_cat, "s h d -> 1 s h d")
 
-            attn_out = F.scaled_dot_product_attention(
-                q_sdpa,
-                k_sdpa,
-                v_sdpa,
-                is_causal=causal,
+            attn_out = attention(
+                q_chunk,
+                k_chunk,
+                v_chunk,
+                attention_mode=attention_mode,
+                attn_mask=None,
+                causal=causal,
             )
 
-            out_locals.append(attn_out.squeeze(0).permute(1, 0, 2))
+            out_locals.append(attn_out.squeeze(0))
 
         out_cat = torch.cat(out_locals, dim=0)
         outputs.append(rearrange(out_cat, "s h d -> h s d"))
