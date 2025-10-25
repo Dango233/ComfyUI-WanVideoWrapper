@@ -1,5 +1,9 @@
 # Copyright 2024-2025 The Alibaba Wan Team Authors. All rights reserved.
 import torch
+from typing import List, Sequence
+
+from einops import rearrange
+
 from ...utils import log
 
 # Flash Attention imports
@@ -68,6 +72,7 @@ except:
 __all__ = [
     'flash_attention',
     'attention',
+    'sparse_shot_attention',
 ]
 
 
@@ -239,3 +244,131 @@ def attention(
         return sageattn_func_compiled(q, k, v, tensor_layout="NHD").contiguous()
     else:
         return sageattn_func(q, k, v, tensor_layout="NHD").contiguous()
+
+
+def _get_flash_attn_varlen():
+    if FLASH_ATTN_3_AVAILABLE:
+        return flash_attn_interface.flash_attn_varlen_func
+    if FLASH_ATTN_2_AVAILABLE:
+        return flash_attn.flash_attn_varlen_func
+    raise RuntimeError("flash-attn varlen kernel is required for sparse shot attention")
+
+
+def _build_global_reps(
+    locals_k: List[torch.Tensor],
+    locals_v: List[torch.Tensor],
+    g_per: int,
+    mode: str,
+):
+    if g_per <= 0 or len(locals_k) == 0:
+        empty_k = torch.empty(0, *locals_k[0].shape[1:], device=locals_k[0].device, dtype=locals_k[0].dtype)
+        empty_v = torch.empty_like(empty_k)
+        return empty_k, empty_v
+
+    reps_k, reps_v = [], []
+    for k_shot, v_shot in zip(locals_k, locals_v):
+        if k_shot.size(0) == 0:
+            continue
+        if mode == "mean":
+            idx = torch.linspace(0, k_shot.size(0) - 1, steps=g_per, device=k_shot.device).long()
+            reps_k.append(k_shot.index_select(0, idx))
+            reps_v.append(v_shot.index_select(0, idx))
+        elif mode == "linspace":
+            idx = torch.linspace(0, k_shot.size(0) - 1, steps=g_per, device=k_shot.device).long()
+            reps_k.append(k_shot.index_select(0, idx))
+            reps_v.append(v_shot.index_select(0, idx))
+        else:  # firstk
+            take = min(g_per, k_shot.size(0))
+            reps_k.append(k_shot[:take])
+            reps_v.append(v_shot[:take])
+
+    if len(reps_k) == 0:
+        empty_k = torch.empty(0, *locals_k[0].shape[1:], device=locals_k[0].device, dtype=locals_k[0].dtype)
+        empty_v = torch.empty_like(empty_k)
+        return empty_k, empty_v
+
+    return torch.cat(reps_k, dim=0), torch.cat(reps_v, dim=0)
+
+
+def sparse_shot_attention(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    shot_latent_indices: Sequence[Sequence[int]],
+    num_heads: int,
+    per_g: int = 64,
+    mode: str = "firstk",
+    causal: bool = False,
+):
+    """Shot-aware varlen attention with lightweight global token pooling."""
+    if q.shape != k.shape or q.shape != v.shape:
+        raise ValueError("q, k, v must share the same shape")
+
+    batch, seqlen, heads, head_dim = q.shape
+    q = rearrange(q, "b s h d -> b h s d").contiguous()
+    k = rearrange(k, "b s h d -> b h s d").contiguous()
+    v = rearrange(v, "b s h d -> b h s d").contiguous()
+
+    varlen_attn = _get_flash_attn_varlen()
+    outputs = []
+
+    for b_idx in range(batch):
+        cuts = list(shot_latent_indices[b_idx])
+        if not cuts or cuts[0] != 0 or cuts[-1] != seqlen:
+            raise ValueError("shot_latent_indices must start at 0 and end at sequence length")
+
+        q_shots = [q[b_idx, :, cuts[i]:cuts[i + 1], :] for i in range(len(cuts) - 1)]
+        k_shots = [k[b_idx, :, cuts[i]:cuts[i + 1], :] for i in range(len(cuts) - 1)]
+        v_shots = [v[b_idx, :, cuts[i]:cuts[i + 1], :] for i in range(len(cuts) - 1)]
+
+        q_locals = [rearrange(qi, "h s d -> s h d") for qi in q_shots]
+        k_locals = [rearrange(ki, "h s d -> s h d") for ki in k_shots]
+        v_locals = [rearrange(vi, "h s d -> s h d") for vi in v_shots]
+
+        k_global, v_global = _build_global_reps(k_locals, v_locals, per_g, mode)
+
+        kv_lengths = []
+        k_concat, v_concat = [], []
+        for k_local, v_local in zip(k_locals, v_locals):
+            if k_global.numel() > 0:
+                k_cat = torch.cat([k_local, k_global], dim=0)
+                v_cat = torch.cat([v_local, v_global], dim=0)
+            else:
+                k_cat = k_local
+                v_cat = v_local
+            k_concat.append(k_cat)
+            v_concat.append(v_cat)
+            kv_lengths.append(k_cat.size(0))
+
+        q_packed = torch.cat(q_locals, dim=0)
+        k_packed = torch.cat(k_concat, dim=0)
+        v_packed = torch.cat(v_concat, dim=0)
+
+        shot_lengths = [end - start for start, end in zip(cuts[:-1], cuts[1:])]
+        q_cu = torch.tensor([0] + list(torch.cumsum(torch.tensor(shot_lengths, device=q.device), dim=0)), device=q.device, dtype=torch.int32)
+        kv_cu = torch.tensor([0] + list(torch.cumsum(torch.tensor(kv_lengths, device=q.device), dim=0)), device=q.device, dtype=torch.int32)
+
+        max_q = max(shot_lengths) if shot_lengths else 0
+        max_kv = max(kv_lengths) if kv_lengths else 0
+
+        out_packed = varlen_attn(
+            q_packed,
+            k_packed,
+            v_packed,
+            q_seqlens=q_cu,
+            k_seqlens=kv_cu,
+            max_seqlen_q=max_q,
+            max_seqlen_k=max_kv,
+            causal=causal,
+        )
+
+        out_chunks = []
+        for i in range(len(shot_lengths)):
+            start = q_cu[i].item()
+            end = q_cu[i + 1].item()
+            out_chunks.append(out_packed[start:end])
+        out_local = torch.cat(out_chunks, dim=0)
+        outputs.append(rearrange(out_local, "s h d -> h s d"))
+
+    stacked = torch.stack(outputs, dim=0)
+    return rearrange(stacked, "b h s d -> b s h d")

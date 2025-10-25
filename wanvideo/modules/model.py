@@ -12,7 +12,8 @@ try:
 except:
     pass
 
-from .attention import attention
+from .attention import attention, sparse_shot_attention
+from .shot_utils import build_cross_attention_mask, build_shot_indices, labels_to_cuts
 import numpy as np
 from tqdm import tqdm
 import gc
@@ -463,7 +464,17 @@ class WanSelfAttention(nn.Module):
         v = (self.v(x) + self.v_loras(x)).view(b, s, n, d)
         return q, k, v
 
-    def forward(self, q, k, v, seq_lens, lynx_ref_feature=None, lynx_ref_scale=1.0, attention_mode_override=None):
+    def forward(
+        self,
+        q,
+        k,
+        v,
+        seq_lens,
+        lynx_ref_feature=None,
+        lynx_ref_scale=1.0,
+        attention_mode_override=None,
+        shot_config=None,
+    ):
         r"""
         Args:
             x(Tensor): Shape [B, L, num_heads, C / num_heads]
@@ -478,7 +489,25 @@ class WanSelfAttention(nn.Module):
         if self.ref_adapter is not None and lynx_ref_feature is not None:
             ref_x = self.ref_adapter(self, q, lynx_ref_feature)
 
-        x = attention(q, k, v, k_lens=seq_lens, attention_mode=attention_mode)
+        use_shot_attention = False
+        if shot_config is not None:
+            indices = shot_config.get("indices")
+            per_g = shot_config.get("global_tokens", 0)
+            mode = shot_config.get("mode", "firstk")
+            if indices is not None and per_g > 0:
+                x = sparse_shot_attention(
+                    q,
+                    k,
+                    v,
+                    shot_latent_indices=indices,
+                    num_heads=self.num_heads,
+                    per_g=per_g,
+                    mode=mode,
+                )
+                use_shot_attention = True
+
+        if not use_shot_attention:
+            x = attention(q, k, v, k_lens=seq_lens, attention_mode=attention_mode)
 
         if self.ref_adapter is not None and lynx_ref_feature is not None:
             x = x.add(ref_x, alpha=lynx_ref_scale)
@@ -668,7 +697,8 @@ class WanT2VCrossAttention(WanSelfAttention):
     def forward(self, x, context, grid_sizes=None, clip_embed=None, audio_proj=None, audio_scale=1.0, 
                 num_latent_frames=21, nag_params={}, nag_context=None, is_uncond=False, rope_func="comfy", 
                 inner_t=None, inner_c=None, cross_freqs=None,
-                adapter_proj=None, adapter_attn_mask=None, ip_scale=1.0, orig_seq_len=None, lynx_x_ip=None, lynx_ip_scale=1.0, **kwargs):
+                adapter_proj=None, adapter_attn_mask=None, ip_scale=1.0, orig_seq_len=None, lynx_x_ip=None, lynx_ip_scale=1.0,
+                attn_mask=None, **kwargs):
         b, n, d = x.size(0), self.num_heads, self.head_dim
         # compute query
         q = self.norm_q(self.q(x),num_chunks=2 if rope_func == "comfy_chunked" else 1).view(b, -1, n, d)
@@ -684,7 +714,8 @@ class WanT2VCrossAttention(WanSelfAttention):
                 q = rope_apply_z(q, grid_sizes, cross_freqs, inner_t).to(q)
                 k = rope_apply_c(k, cross_freqs, inner_c).to(q)
 
-            x = attention(q, k, v, attention_mode=self.attention_mode).flatten(2)
+            attn_mode = self.attention_mode
+            x = attention(q, k, v, attention_mode=attn_mode, attn_mask=attn_mask).flatten(2)
 
         if lynx_x_ip is not None and self.ip_adapter is not None and ip_scale !=0:
             lynx_x_ip = self.ip_adapter(self, q, lynx_x_ip)
@@ -1130,6 +1161,9 @@ class WanAttentionBlock(nn.Module):
                       and inner_t is None
                       and x_ip is None  # Don't split when using IP-Adapter
                       )
+        shot_config = kwargs.get("shot_config", None)
+        cross_attn_mask = kwargs.get("cross_attn_mask", None)
+
         if split_attn:
             y = self.self_attn.forward_split(
             q, k, v, 
@@ -1145,14 +1179,14 @@ class WanAttentionBlock(nn.Module):
                 if self.dense_attention_mode == "sparse_sage_attn":
                     y = self.self_attn.forward_radial(q, k, v, dense_step=True)
                 else:
-                    y = self.self_attn.forward(q, k, v, seq_lens)
+                    y = self.self_attn.forward(q, k, v, seq_lens, shot_config=shot_config)
             else:
                 y = self.self_attn.forward_radial(q, k, v, dense_step=False)
         elif self.attention_mode == "sageattn_3":
             if current_step != 0 and not last_step:
-                y = self.self_attn.forward(q, k, v, seq_lens, attention_mode_override="sageattn_3")
+                y = self.self_attn.forward(q, k, v, seq_lens, attention_mode_override="sageattn_3", shot_config=shot_config)
             else:
-                y = self.self_attn.forward(q, k, v, seq_lens, attention_mode_override="sageattn")
+                y = self.self_attn.forward(q, k, v, seq_lens, attention_mode_override="sageattn", shot_config=shot_config)
         elif x_ip is not None and self.kv_cache is None: #stand-in
             # First pass: cache IP keys/values and compute attention
             self.kv_cache = {"k_ip": k_ip.detach(), "v_ip": v_ip.detach()}
@@ -1165,7 +1199,7 @@ class WanAttentionBlock(nn.Module):
             full_v = torch.cat([v, v_ip], dim=1)
             y = self.self_attn.forward(q, full_k, full_v, seq_lens)
         else:
-            y = self.self_attn.forward(q, k, v, seq_lens, lynx_ref_feature=lynx_ref_feature, lynx_ref_scale=lynx_ref_scale)
+            y = self.self_attn.forward(q, k, v, seq_lens, lynx_ref_feature=lynx_ref_feature, lynx_ref_scale=lynx_ref_scale, shot_config=shot_config)
         
         if lynx_ref_feature is None and self.self_attn.ref_adapter is not None:
             lynx_ref_feature = input_x
@@ -1226,13 +1260,40 @@ class WanAttentionBlock(nn.Module):
                     raise NotImplementedError("nag_context is not supported in split_cross_attn_ffn")
                 x = self.split_cross_attn_ffn(x, context, shift_mlp, scale_mlp, gate_mlp, clip_embed, grid_sizes)
             else:
-                x = self.cross_attn_ffn(x, context, grid_sizes, shift_mlp, scale_mlp, gate_mlp, clip_embed, 
-                                        audio_proj, audio_scale, num_latent_frames, nag_params, nag_context, is_uncond, 
-                                        multitalk_audio_embedding, x_ref_attn_map, human_num, inner_t, inner_c, cross_freqs,
-                                        adapter_proj=adapter_proj, ip_scale=ip_scale, zero_timestep=zero_timestep,
-                                        mtv_freqs=mtv_freqs, mtv_motion_tokens=mtv_motion_tokens, mtv_motion_rotary_emb=mtv_motion_rotary_emb, mtv_strength=mtv_strength,
-                                        humo_audio_input=humo_audio_input, humo_audio_scale=humo_audio_scale, lynx_x_ip=lynx_x_ip, lynx_ip_scale=lynx_ip_scale, original_seq_len=original_seq_len
-                                        )
+                x = self.cross_attn_ffn(
+                    x,
+                    context,
+                    grid_sizes,
+                    shift_mlp,
+                    scale_mlp,
+                    gate_mlp,
+                    clip_embed,
+                    audio_proj,
+                    audio_scale,
+                    num_latent_frames,
+                    nag_params,
+                    nag_context,
+                    is_uncond,
+                    multitalk_audio_embedding,
+                    x_ref_attn_map,
+                    human_num,
+                    inner_t,
+                    inner_c,
+                    cross_freqs,
+                    adapter_proj=adapter_proj,
+                    ip_scale=ip_scale,
+                    zero_timestep=zero_timestep,
+                    mtv_freqs=mtv_freqs,
+                    mtv_motion_tokens=mtv_motion_tokens,
+                    mtv_motion_rotary_emb=mtv_motion_rotary_emb,
+                    mtv_strength=mtv_strength,
+                    humo_audio_input=humo_audio_input,
+                    humo_audio_scale=humo_audio_scale,
+                    lynx_x_ip=lynx_x_ip,
+                    lynx_ip_scale=lynx_ip_scale,
+                    original_seq_len=original_seq_len,
+                    attn_mask=cross_attn_mask,
+                )
         else:
             if self.rope_func == "comfy_chunked":
                 y = self.ffn_chunked(x, shift_mlp, scale_mlp)
@@ -1249,17 +1310,48 @@ class WanAttentionBlock(nn.Module):
         return x, x_ip, lynx_ref_feature, x_ovi
 
     
-    def cross_attn_ffn(self, x, context, grid_sizes, shift_mlp, scale_mlp, gate_mlp, clip_embed, 
-                       audio_proj, audio_scale, num_latent_frames, nag_params, 
-                       nag_context, is_uncond, multitalk_audio_embedding, x_ref_attn_map, human_num,
-                       inner_t, inner_c, cross_freqs, adapter_proj, ip_scale, zero_timestep, mtv_freqs, mtv_motion_tokens, mtv_motion_rotary_emb, mtv_strength,
-                       humo_audio_input, humo_audio_scale, lynx_x_ip, lynx_ip_scale, original_seq_len):
+    def cross_attn_ffn(
+        self,
+        x,
+        context,
+        grid_sizes,
+        shift_mlp,
+        scale_mlp,
+        gate_mlp,
+        clip_embed,
+        audio_proj,
+        audio_scale,
+        num_latent_frames,
+        nag_params,
+        nag_context,
+        is_uncond,
+        multitalk_audio_embedding,
+        x_ref_attn_map,
+        human_num,
+        inner_t,
+        inner_c,
+        cross_freqs,
+        adapter_proj,
+        ip_scale,
+        zero_timestep,
+        mtv_freqs,
+        mtv_motion_tokens,
+        mtv_motion_rotary_emb,
+        mtv_strength,
+        humo_audio_input,
+        humo_audio_scale,
+        lynx_x_ip,
+        lynx_ip_scale,
+        original_seq_len,
+        attn_mask=None,
+    ):
 
             x = x + self.cross_attn(self.norm3(x), context, grid_sizes, clip_embed=clip_embed,
                                     audio_proj=audio_proj, audio_scale=audio_scale,
                                     num_latent_frames=num_latent_frames, nag_params=nag_params, nag_context=nag_context, is_uncond=is_uncond,
                                     rope_func=self.rope_func, inner_t=inner_t, inner_c=inner_c, cross_freqs=cross_freqs,
-                                    adapter_proj=adapter_proj, ip_scale=ip_scale, orig_seq_len=original_seq_len, lynx_x_ip=lynx_x_ip, lynx_ip_scale=lynx_ip_scale, )
+                                    adapter_proj=adapter_proj, ip_scale=ip_scale, orig_seq_len=original_seq_len, lynx_x_ip=lynx_x_ip, lynx_ip_scale=lynx_ip_scale,
+                                    attn_mask=attn_mask)
             # MultiTalk
             if multitalk_audio_embedding is not None and not isinstance(self, VaceWanAttentionBlock):
                 x_audio = self.audio_cross_attn(self.norm_x(x), encoder_hidden_states=multitalk_audio_embedding,
@@ -2163,6 +2255,10 @@ class WanModel(torch.nn.Module):
         lynx_embeds=None,
         x_ovi=None, seq_len_ovi=None, ovi_negative_text_embeds=None,
         flashvsr_LQ_latent=None, flashvsr_strength=1.0,
+        shot_indices=None,
+        shot_attention_cfg=None,
+        shot_mask_type=None,
+        text_cut_positions=None,
     ):
         r"""
         Forward pass through the diffusion model
@@ -2245,6 +2341,38 @@ class WanModel(torch.nn.Module):
         # params
         device = self.main_device
 
+        shot_attention_enabled = bool(shot_attention_cfg and shot_attention_cfg.get("enabled", False))
+        shot_global_tokens = int(shot_attention_cfg.get("global_tokens", 0)) if shot_attention_enabled else 0
+        shot_mode = shot_attention_cfg.get("mode", "firstk") if shot_attention_enabled else "firstk"
+        if shot_attention_enabled:
+            if shot_global_tokens <= 0:
+                raise ValueError("Shot Attention 已启用，但 global_tokens ≤ 0。请在 WanVideoSetShotAttention 或 WanVideoShotAttentionOptions 中设置正数。")
+            if shot_indices is None:
+                raise ValueError("Shot Attention 已启用，但未收到 shot_indices。请检查采样链路传递的 WanVideoShotArgs。")
+            if isinstance(shot_indices, torch.Tensor):
+                shot_indices_tensor = shot_indices.to(device=device, dtype=torch.long)
+            else:
+                shot_indices_tensor = torch.tensor(shot_indices, device=device, dtype=torch.long)
+            if shot_indices_tensor.dim() == 1:
+                shot_indices_tensor = shot_indices_tensor.unsqueeze(0)
+        else:
+            if shot_indices is not None:
+                raise ValueError("检测到 shot_indices，但模型未启用 Shot Attention。请保持节点一致。")
+            shot_indices_tensor = None
+
+        shot_block_config = None
+        cross_attn_mask = None
+        shot_latent_cuts = None
+        spatial_tokens = None
+
+        shot_positions = None
+        if isinstance(text_cut_positions, list) and len(text_cut_positions) > 0:
+            shot_positions = text_cut_positions[0]
+        elif isinstance(text_cut_positions, dict):
+            shot_positions = text_cut_positions
+        if shot_attention_enabled and (not shot_positions or shot_positions.get("global") is None):
+            raise ValueError("Shot Attention 已启用，但缺少结构化提示位置。请确认 prompt 含 [global caption]/[per shot caption]/[shot cut] 标签。")
+
         if freqs is not None and freqs.device != device:
            freqs = freqs.to(device)
 
@@ -2304,6 +2432,27 @@ class WanModel(torch.nn.Module):
         # grid sizes and seq len
         grid_sizes = torch.stack([torch.tensor(u.shape[2:], device=device, dtype=torch.long) for u in x])
         original_grid_sizes = grid_sizes.clone()
+
+        if shot_attention_enabled:
+            batch_latents = len(x)
+            if shot_indices_tensor.shape[0] == 1 and batch_latents > 1:
+                shot_indices_tensor = shot_indices_tensor.repeat(batch_latents, 1)
+            if shot_indices_tensor.shape[0] != batch_latents:
+                raise ValueError("Shot Attention: shot_indices 批大小与 latent 批次不一致。")
+
+            latent_frames = grid_sizes[0][0].item()
+            if shot_indices_tensor.shape[1] != latent_frames:
+                raise ValueError("Shot Attention: shot_indices 长度与 latent 帧数不匹配。")
+
+            spatial_tokens = int(grid_sizes[0][1].item() * grid_sizes[0][2].item())
+            shot_token_labels = shot_indices_tensor.repeat_interleave(spatial_tokens, dim=1)
+            shot_latent_cuts = labels_to_cuts(shot_token_labels)
+            shot_block_config = {
+                "indices": shot_latent_cuts,
+                "global_tokens": shot_global_tokens,
+                "mode": shot_mode,
+            }
+
         x = [u.flatten(2).transpose(1, 2) for u in x]
         self.original_seq_len = x[0].shape[1]
         seq_lens = torch.tensor([u.size(1) for u in x], dtype=torch.int32)
@@ -2543,6 +2692,20 @@ class WanModel(torch.nn.Module):
             if self.offload_img_emb:
                 self.img_emb.to(self.offload_device, non_blocking=self.use_non_blocking)
 
+        if shot_attention_enabled and shot_block_config is not None and shot_positions is not None and context is not None and spatial_tokens is not None:
+            try:
+                context_length = context.shape[1]
+                cross_attn_mask = build_cross_attention_mask(
+                    shot_indices_tensor,
+                    shot_positions,
+                    context_length=context_length,
+                    spatial_tokens=spatial_tokens,
+                    device=x[0].device,
+                    dtype=x[0].dtype,
+                )
+            except Exception as exc:
+                raise ValueError(f"Shot Attention 构建跨注意力 mask 失败: {exc}") from exc
+
         # MultiTalk
         if multitalk_audio is not None:
             self.multitalk_audio_proj.to(self.main_device)
@@ -2753,6 +2916,8 @@ class WanModel(torch.nn.Module):
                 lynx_x_ip=lynx_x_ip,
                 lynx_ip_scale=lynx_ip_scale,
                 lynx_ref_scale=lynx_ref_scale,
+                shot_config=shot_block_config if shot_attention_enabled else None,
+                cross_attn_mask=cross_attn_mask,
             )
             if self.audio_model is not None:
                 kwargs['e_ovi'] = e0_ovi.to(self.base_dtype)
