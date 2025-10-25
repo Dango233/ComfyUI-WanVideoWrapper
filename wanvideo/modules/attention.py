@@ -226,6 +226,8 @@ def attention(
             version=fa_version,
         )
     elif attention_mode == 'sdpa':
+        if attn_mask is not None and attn_mask.dtype != q.dtype:
+            attn_mask = attn_mask.to(q.dtype)
         if not (q.dtype == k.dtype == v.dtype):
             return torch.nn.functional.scaled_dot_product_attention(q.transpose(1, 2), k.transpose(1, 2).to(q.dtype), v.transpose(1, 2).to(q.dtype), attn_mask=attn_mask).transpose(1, 2).contiguous()
         return torch.nn.functional.scaled_dot_product_attention(q.transpose(1, 2), k.transpose(1, 2), v.transpose(1, 2), attn_mask=attn_mask).transpose(1, 2).contiguous()
