@@ -508,6 +508,7 @@ class WanSelfAttention(nn.Module):
                     per_g=per_g,
                     mode=mode,
                     backend=backend,
+                    attention_mode=attention_mode,
                 )
                 use_shot_attention = True
 
