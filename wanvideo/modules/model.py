@@ -1232,19 +1232,18 @@ class WanAttentionBlock(nn.Module):
             full_k = torch.cat([k, k_ip], dim=1)
             full_v = torch.cat([v, v_ip], dim=1)
             y = self.self_attn.forward(q, full_k, full_v, seq_lens)
-        elif is_longcat:
-            if num_cond_latents is not None and num_cond_latents > 0:
-                num_cond_latents_thw = num_cond_latents * (N // grid_sizes[0][0])
-                # process the condition tokens
-                q_cond = q[:, :num_cond_latents_thw].contiguous()
-                k_cond = k[:, :num_cond_latents_thw].contiguous()
-                v_cond = v[:, :num_cond_latents_thw].contiguous()
-                x_cond = self.self_attn.forward(q_cond, k_cond, v_cond, seq_lens)
-                # process the noise tokens
-                q_noise = q[:, num_cond_latents_thw:].contiguous()
-                x_noise = self.self_attn.forward(q_noise, k, v, seq_lens)
-                # merge x_cond and x_noise
-                y = torch.cat([x_cond, x_noise], dim=1).contiguous()
+        elif is_longcat and num_cond_latents is not None and num_cond_latents > 0:
+            num_cond_latents_thw = num_cond_latents * (N // grid_sizes[0][0])
+            # process the condition tokens
+            x_cond = self.self_attn.forward(
+                q[:, :num_cond_latents_thw].contiguous(), 
+                k[:, :num_cond_latents_thw].contiguous(), 
+                v[:, :num_cond_latents_thw].contiguous(), 
+                seq_lens)
+            # process the noise tokens
+            x_noise = self.self_attn.forward(q[:, num_cond_latents_thw:].contiguous(), k, v, seq_lens)
+            # merge x_cond and x_noise
+            y = torch.cat([x_cond, x_noise], dim=1).contiguous()
         else:
             y = self.self_attn.forward(q, k, v, seq_lens, lynx_ref_feature=lynx_ref_feature, lynx_ref_scale=lynx_ref_scale)
         
