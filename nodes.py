@@ -157,7 +157,7 @@ class WanVideoHolocineShotArgs:
     def INPUT_TYPES(s):
         return {
             "required": {
-                "total_frames": ("INT", {"default": 81, "min": 5, "max": 2049, "step": 1, "tooltip": "Total pixel frames to generate (rounded to 4t+1)."}),
+                "image_embeds": ("WANVIDIMAGE_EMBEDS", {"tooltip": "Image embeds produced by WanVideoEmptyEmbeds (or equivalent) for frame inference."}),
                 "shot_cut_frames": ("STRING", {"default": "40, 80", "tooltip": "Comma or space separated frame indices where a new shot begins."}),
             }
         }
@@ -167,7 +167,22 @@ class WanVideoHolocineShotArgs:
     FUNCTION = "process"
     CATEGORY = "WanVideoWrapper/Holocine"
 
-    def process(self, total_frames, shot_cut_frames):
+    def process(self, image_embeds, shot_cut_frames):
+        total_frames = image_embeds.get("num_frames") if isinstance(image_embeds, dict) else None
+        if torch.is_tensor(total_frames):
+            total_frames = int(total_frames.item())
+
+        if total_frames is None:
+            target_shape = image_embeds.get("target_shape") if isinstance(image_embeds, dict) else None
+            if target_shape is not None and len(target_shape) >= 2:
+                latent_frames = target_shape[1]
+                if torch.is_tensor(latent_frames):
+                    latent_frames = int(latent_frames.item())
+                total_frames = 1 + (latent_frames - 1) * VAE_STRIDE[0]
+
+        if total_frames is None:
+            raise ValueError("Failed to infer frame count from image_embeds. Please connect WanVideoEmptyEmbeds or an equivalent output that provides num_frames.")
+
         total_frames_proc = enforce_4t_plus_1(total_frames)
         try:
             raw_cuts = parse_shot_cut_string(shot_cut_frames)
@@ -228,7 +243,7 @@ class WanVideoHolocinePromptEncode:
                 "shot_list": ("WANVID_HOLOCINE_SHOT_LIST",),
                 "negative_prompt": ("STRING", {"default": "", "multiline": True}),
                 "t5": ("WANTEXTENCODER",),
-                "image_embeds": ("WANVIDIMAGE_EMBEDS", {"tooltip": "来自 WanVideoEmptyEmbeds 或对等节点的输出，用于确认帧数。"}),
+                "image_embeds": ("WANVIDIMAGE_EMBEDS", {"tooltip": "Image embeds produced by WanVideoEmptyEmbeds (or equivalent) for frame inference."}),
             },
             "optional": {
                 "custom_shot_cut_frames": ("STRING", {"default": "", "tooltip": "可选：自定义镜头切换帧，逗号/空格分隔。留空则按镜头数平均分配。"}),
@@ -297,7 +312,7 @@ class WanVideoHolocinePromptEncode:
                     latent_frames = int(latent_frames.item())
                 total_frames = 1 + (latent_frames - 1) * VAE_STRIDE[0]
         if total_frames is None:
-            raise ValueError("无法从 image_embeds 中推断帧数，请确保连接的是 WanVideoEmptyEmbeds 或包含 num_frames 的等价节点。")
+            raise ValueError("Failed to infer frame count from image_embeds. Please connect WanVideoEmptyEmbeds or an equivalent output that provides num_frames.")
         total_frames = enforce_4t_plus_1(total_frames)
 
         custom_cuts = []
