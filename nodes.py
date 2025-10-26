@@ -226,9 +226,9 @@ class WanVideoHolocinePromptEncode:
             "required": {
                 "global_caption": ("STRING", {"default": "", "multiline": True, "tooltip": "整体场景描述，会自动拼接到 [global caption] 段落。"}),
                 "shot_list": ("WANVID_HOLOCINE_SHOT_LIST",),
-                "total_frames": ("INT", {"default": 81, "min": 5, "max": 401, "step": 4, "tooltip": "最终帧数，将自动调整为 4t+1"}),
                 "negative_prompt": ("STRING", {"default": "", "multiline": True}),
                 "t5": ("WANTEXTENCODER",),
+                "image_embeds": ("WANVIDIMAGE_EMBEDS", {"tooltip": "来自 WanVideoEmptyEmbeds 或对等节点的输出，用于确认帧数。"}),
             },
             "optional": {
                 "custom_shot_cut_frames": ("STRING", {"default": "", "tooltip": "可选：自定义镜头切换帧，逗号/空格分隔。留空则按镜头数平均分配。"}),
@@ -279,13 +279,25 @@ class WanVideoHolocinePromptEncode:
 
         return prompt.strip()
 
-    def process(self, global_caption, shot_list, total_frames, negative_prompt, t5,
+    def process(self, global_caption, shot_list, negative_prompt, t5, image_embeds,
                 custom_shot_cut_frames="", append_shot_summary=True,
                 force_offload=True, model_to_offload=None, use_disk_cache=False, device="gpu"):
         if not shot_list or len(shot_list) == 0:
             raise ValueError("At least one shot is required. Please chain WanVideoHolocineShotBuilder nodes first.")
 
         shots = sorted([dict(item) for item in shot_list], key=lambda s: s.get("index", 0))
+        total_frames = image_embeds.get("num_frames") if isinstance(image_embeds, dict) else None
+        if torch.is_tensor(total_frames):
+            total_frames = int(total_frames.item())
+        if total_frames is None:
+            target_shape = image_embeds.get("target_shape") if isinstance(image_embeds, dict) else None
+            if target_shape is not None and len(target_shape) >= 2:
+                latent_frames = target_shape[1]
+                if torch.is_tensor(latent_frames):
+                    latent_frames = int(latent_frames.item())
+                total_frames = 1 + (latent_frames - 1) * VAE_STRIDE[0]
+        if total_frames is None:
+            raise ValueError("无法从 image_embeds 中推断帧数，请确保连接的是 WanVideoEmptyEmbeds 或包含 num_frames 的等价节点。")
         total_frames = enforce_4t_plus_1(total_frames)
 
         custom_cuts = []
