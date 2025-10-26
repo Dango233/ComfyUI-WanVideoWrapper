@@ -2363,7 +2363,7 @@ class WanModel(torch.nn.Module):
             if shot_backend != "full" and shot_global_tokens <= 0:
                 raise ValueError("Shot attention is enabled but global_tokens is ≤ 0. Set a positive value in WanVideoSetShotAttention.")
             if shot_indices is None:
-                raise ValueError("Shot attention is enabled but shot_indices are missing. Check the WanVideoShotArgs wiring.")
+                raise ValueError("Shot attention is enabled but shot_indices are missing. Ensure WanVideoHolocineShotArgs/Holocine Prompt nodes are connected.")
             if isinstance(shot_indices, torch.Tensor):
                 shot_indices_tensor = shot_indices.to(device=device, dtype=torch.long)
             else:

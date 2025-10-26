@@ -144,7 +144,7 @@ class WanVideoSampler:
                 "uni3c_embeds": ("UNI3C_EMBEDS", ),
                 "multitalk_embeds": ("MULTITALK_EMBEDS", ),
                 "freeinit_args": ("FREEINITARGS", ),
-                "shot_args": ("SHOTARGS", ),
+                "holocine_args": ("HOLOCINE_SHOTARGS", ),
                 "start_step": ("INT", {"default": 0, "min": 0, "max": 10000, "step": 1, "tooltip": "Start step for the sampling, 0 means full sampling, otherwise samples only from this step"}),
                 "end_step": ("INT", {"default": -1, "min": -1, "max": 10000, "step": 1, "tooltip": "End step for the sampling, -1 means full sampling, otherwise samples only until this step"}),
                 "add_noise_to_samples": ("BOOLEAN", {"default": False, "tooltip": "Add noise to the samples before sampling, needed for video2video sampling when starting from clean video"}),
@@ -160,7 +160,7 @@ class WanVideoSampler:
         force_offload=True, samples=None, feta_args=None, denoise_strength=1.0, context_options=None,
         cache_args=None, teacache_args=None, flowedit_args=None, batched_cfg=False, slg_args=None, rope_function="default", loop_args=None,
         experimental_args=None, sigmas=None, unianimate_poses=None, fantasytalking_embeds=None, uni3c_embeds=None, multitalk_embeds=None, freeinit_args=None,
-        shot_args=None, start_step=0, end_step=-1, add_noise_to_samples=False):
+        holocine_args=None, start_step=0, end_step=-1, add_noise_to_samples=False):
 
         patcher = model
         model = model.model
@@ -181,14 +181,14 @@ class WanVideoSampler:
         model_shot_cfg = transformer_options.get("shot_attention") if transformer_options is not None else None
         model_shot_enabled = bool(model_shot_cfg and model_shot_cfg.get("enabled", False))
 
-        args_present = shot_args is not None
+        args_present = holocine_args is not None
 
         if model_shot_enabled:
             if not args_present:
-                raise ValueError("Shot attention was enabled during model load, but WanVideoShotArgs node is missing.")
+                raise ValueError("Holocine shot attention was enabled during model load, but Holocine shot args are missing.")
         else:
             if args_present:
-                raise ValueError("WanVideoShotArgs detected, but shot attention was not enabled in WanVideoSetShotAttention.")
+                raise ValueError("Holocine shot args detected, but shot attention was not enabled in WanVideoSetShotAttention")
 
         if not model_shot_enabled:
             shot_attention_cfg = None
@@ -591,7 +591,7 @@ class WanVideoSampler:
         latent_video_length = noise.shape[1]
 
         if shot_attention_cfg:
-            debug_info = {"shot_args_present": shot_args is not None,
+            debug_info = {"holocine_args_present": holocine_args is not None,
                            "text_cut_positions_type": type(text_cut_positions).__name__,
                            "model_shot_cfg": shot_attention_cfg,
                            "prompt_positions_sample": None}
@@ -607,7 +607,7 @@ class WanVideoSampler:
             if not first_shot_positions or first_shot_positions.get('global') is None:
                 raise ValueError(f"Shot Attention 需要在 prompt 中标注 [global caption]/[per shot caption]/[shot cut]。诊断: {debug_info}")
 
-            shot_cut_frames = shot_args.get("shot_cut_frames", [])
+            shot_cut_frames = holocine_args.get("shot_cut_frames", [])
             try:
                 shot_indices_tensor = build_shot_indices(latent_video_length, shot_cut_frames)
                 shot_indices_tensor = shot_indices_tensor.to(device)
