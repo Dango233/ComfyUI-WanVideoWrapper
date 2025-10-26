@@ -496,9 +496,10 @@ class WanSelfAttention(nn.Module):
             mode = shot_config.get("mode", "firstk")
             backend = (shot_config.get("backend") or "auto") if shot_config else "auto"
             backend = backend.lower()
+            prefix_tokens = int(shot_config.get("prefix_tokens", 0) or 0)
             if backend == "full":
                 use_shot_attention = False
-            elif indices is not None and per_g > 0:
+            elif indices is not None and (per_g > 0 or prefix_tokens > 0):
                 x = sparse_shot_attention(
                     q,
                     k,
@@ -509,6 +510,7 @@ class WanSelfAttention(nn.Module):
                     mode=mode,
                     backend=backend,
                     attention_mode=attention_mode,
+                    prefix_tokens=prefix_tokens,
                 )
                 use_shot_attention = True
 
@@ -2460,11 +2462,17 @@ class WanModel(torch.nn.Module):
             spatial_tokens = int(grid_sizes[0][1].item() * grid_sizes[0][2].item())
             shot_token_labels = shot_indices_tensor.repeat_interleave(spatial_tokens, dim=1)
             shot_latent_cuts = labels_to_cuts(shot_token_labels)
+
+            prefix_tokens = 0
+            if shot_attention_cfg.get("i2v_mode"):
+                prefix_tokens = spatial_tokens
+
             shot_block_config = {
                 "indices": shot_latent_cuts,
                 "global_tokens": shot_global_tokens,
                 "mode": shot_mode,
                 "backend": shot_backend,
+                "prefix_tokens": prefix_tokens,
             }
 
         x = [u.flatten(2).transpose(1, 2) for u in x]
