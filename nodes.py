@@ -198,8 +198,8 @@ class WanVideoStructuredShot:
             }
         }
 
-    RETURN_TYPES = ("WANVID_STRUCT_SHOT", "WANVID_STRUCT_SHOT_LIST")
-    RETURN_NAMES = ("shot", "shot_list")
+    RETURN_TYPES = ("WANVID_STRUCT_SHOT_LIST",)
+    RETURN_NAMES = ("shot_list",)
     FUNCTION = "process"
     CATEGORY = "WanVideoWrapper/Structured"
 
@@ -215,7 +215,7 @@ class WanVideoStructuredShot:
             "caption": caption,
         }
         shots.append(shot_info)
-        return shot_info, shots
+        return (shots,)
 
 
 class WanVideoStructuredPromptEncode:
@@ -344,7 +344,10 @@ class WanVideoSetShotAttention:
             "optional": {
                 "pooling_mode": (["firstk", "linspace", "mean"], {"default": "firstk", "tooltip": "Representative selection strategy per shot."}),
                 "mask_type": (["none", "normalized", "alternating"], {"default": "none", "tooltip": "Reserved for future shot-mask features."}),
-                "backend": (["auto", "flash", "dense", "full"], {"default": "auto", "tooltip": "Select sparse (flash) backend or dense fallback when flash kernels are unavailable."}),
+                "backend": (["auto", "sparse_flash_attn", "sparse_fallback", "full"], {
+                    "default": "auto",
+                    "tooltip": "Select sparse FlashAttention backend or PyTorch fallback; full disables sparse sampling."
+                }),
                 "i2v_mode": ("BOOLEAN", {"default": False, "tooltip": "Treat the first latent slice as a global anchor (manual I2V mode)."}),
             }
         }

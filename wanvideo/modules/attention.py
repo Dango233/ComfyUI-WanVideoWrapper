@@ -277,9 +277,27 @@ def _build_global_reps(
         if k_shot.size(0) == 0:
             continue
         if mode == "mean":
-            idx = torch.linspace(0, k_shot.size(0) - 1, steps=g_per, device=k_shot.device).long()
-            reps_k.append(k_shot.index_select(0, idx))
-            reps_v.append(v_shot.index_select(0, idx))
+            if g_per >= k_shot.size(0):
+                reps_k.append(k_shot)
+                reps_v.append(v_shot)
+            else:
+                segment_edges = torch.linspace(0, k_shot.size(0), steps=g_per + 1, device=k_shot.device, dtype=torch.float32)
+                seg_k: List[torch.Tensor] = []
+                seg_v: List[torch.Tensor] = []
+                for seg_idx in range(g_per):
+                    start = int(segment_edges[seg_idx].floor().item())
+                    end = int(segment_edges[seg_idx + 1].ceil().item())
+                    end = max(end, start + 1)
+                    end = min(end, k_shot.size(0))
+                    slice_k = k_shot[start:end]
+                    slice_v = v_shot[start:end]
+                    if slice_k.numel() == 0:
+                        slice_k = k_shot[end - 1:end]
+                        slice_v = v_shot[end - 1:end]
+                    seg_k.append(slice_k.mean(dim=0, keepdim=True))
+                    seg_v.append(slice_v.mean(dim=0, keepdim=True))
+                reps_k.append(torch.cat(seg_k, dim=0))
+                reps_v.append(torch.cat(seg_v, dim=0))
         elif mode == "linspace":
             idx = torch.linspace(0, k_shot.size(0) - 1, steps=g_per, device=k_shot.device).long()
             reps_k.append(k_shot.index_select(0, idx))
@@ -315,26 +333,30 @@ def sparse_shot_attention(
         raise ValueError("q, k, v must share the same shape")
 
     backend = (backend or "auto").lower()
+    backend = {
+        "flash": "sparse_flash_attn",
+        "dense": "sparse_fallback",
+    }.get(backend, backend)
     attn_mode_effective = (attention_mode or "sdpa")
 
     if backend == "auto":
-        backend = "flash" if attn_mode_effective.startswith("flash") else "dense"
+        backend = "sparse_flash_attn" if attn_mode_effective.startswith("flash") else "sparse_fallback"
 
     varlen_attn = None
-    if backend == "flash":
+    if backend == "sparse_flash_attn":
         varlen_attn = _get_flash_attn_varlen(required=False)
         if varlen_attn is None:
             global _VARLEN_FALLBACK_WARNED
             if not _VARLEN_FALLBACK_WARNED:
                 log.warning(
-                    "Shot attention requested flash backend but flash varlen kernel not available; using %s instead.",
+                    "Shot attention requested sparse_flash_attn backend but flash varlen kernel not available; using sparse_fallback instead.",
                     attn_mode_effective,
                 )
                 _VARLEN_FALLBACK_WARNED = True
-            backend = "dense"
+            backend = "sparse_fallback"
 
-    if backend != "flash":
-        return _sparse_shot_attention_dense(
+    if backend != "sparse_flash_attn":
+        return _sparse_shot_attention_fallback(
             q,
             k,
             v,
@@ -347,7 +369,7 @@ def sparse_shot_attention(
         )
 
     if varlen_attn is None:
-        raise RuntimeError("flash-attn varlen kernel is required for sparse shot attention")
+        raise RuntimeError("flash-attn varlen kernel is required for sparse_flash_attn backend")
 
     batch, seqlen, heads, head_dim = q.shape
     q = rearrange(q, "b s h d -> b h s d").contiguous()
@@ -430,7 +452,7 @@ def sparse_shot_attention(
     return rearrange(stacked, "b h s d -> b s h d")
 
 
-def _sparse_shot_attention_dense(
+def _sparse_shot_attention_fallback(
     q: torch.Tensor,
     k: torch.Tensor,
     v: torch.Tensor,
