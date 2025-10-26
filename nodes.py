@@ -199,6 +199,7 @@ class WanVideoSetShotAttention:
                 "pooling_mode": (["firstk", "linspace", "mean"], {"default": "firstk", "tooltip": "Representative selection strategy per shot."}),
                 "mask_type": (["none", "normalized", "alternating"], {"default": "none", "tooltip": "Reserved for future shot-mask features."}),
                 "backend": (["auto", "flash", "dense", "full"], {"default": "auto", "tooltip": "Select sparse (flash) backend or dense fallback when flash kernels are unavailable."}),
+                "i2v_mode": ("BOOLEAN", {"default": False, "tooltip": "Treat the first latent slice as a global anchor (manual I2V mode)."}),
             }
         }
 
@@ -207,7 +208,7 @@ class WanVideoSetShotAttention:
     FUNCTION = "apply"
     CATEGORY = "WanVideoWrapper"
 
-    def apply(self, model, enable, global_tokens, pooling_mode="firstk", mask_type="none", backend="auto"):
+    def apply(self, model, enable, global_tokens, pooling_mode="firstk", mask_type="none", backend="auto", i2v_mode=False):
         patcher = model.clone()
         transformer_options = patcher.model_options.setdefault("transformer_options", {})
         transformer_options["shot_attention"] = {
@@ -216,6 +217,7 @@ class WanVideoSetShotAttention:
             "mode": pooling_mode,
             "mask_type": mask_type,
             "backend": backend,
+            "i2v_mode": bool(i2v_mode),
         }
         return (patcher,)
 

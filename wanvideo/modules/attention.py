@@ -308,6 +308,7 @@ def sparse_shot_attention(
     causal: bool = False,
     backend: str = "auto",
     attention_mode: str = "sdpa",
+    prefix_tokens: int = 0,
 ):
     """Shot-aware attention with optional varlen flash kernels or dense fallback."""
     if q.shape != k.shape or q.shape != v.shape:
@@ -342,6 +343,7 @@ def sparse_shot_attention(
             mode=mode,
             causal=causal,
             attention_mode=attn_mode_effective,
+            prefix_tokens=prefix_tokens,
         )
 
     if varlen_attn is None:
@@ -367,17 +369,29 @@ def sparse_shot_attention(
         k_locals = [rearrange(ki, "h s d -> s h d") for ki in k_shots]
         v_locals = [rearrange(vi, "h s d -> s h d") for vi in v_shots]
 
+        prefix_tokens = max(int(prefix_tokens or 0), 0)
+        prefix_k = prefix_v = None
+        if prefix_tokens > 0 and len(k_locals) > 0:
+            take = min(prefix_tokens, k_locals[0].size(0))
+            if take > 0:
+                prefix_k = k_locals[0][:take]
+                prefix_v = v_locals[0][:take]
+
         k_global, v_global = _build_global_reps(k_locals, v_locals, per_g, mode)
 
         kv_lengths = []
         k_concat, v_concat = [], []
-        for k_local, v_local in zip(k_locals, v_locals):
+        for shot_idx, (k_local, v_local) in enumerate(zip(k_locals, v_locals)):
+            parts_k = [k_local]
+            parts_v = [v_local]
             if k_global.numel() > 0:
-                k_cat = torch.cat([k_local, k_global], dim=0)
-                v_cat = torch.cat([v_local, v_global], dim=0)
-            else:
-                k_cat = k_local
-                v_cat = v_local
+                parts_k.append(k_global)
+                parts_v.append(v_global)
+            if prefix_k is not None and shot_idx != 0:
+                parts_k.append(prefix_k)
+                parts_v.append(prefix_v)
+            k_cat = torch.cat(parts_k, dim=0)
+            v_cat = torch.cat(parts_v, dim=0)
             k_concat.append(k_cat)
             v_concat.append(v_cat)
             kv_lengths.append(k_cat.size(0))
@@ -425,6 +439,7 @@ def _sparse_shot_attention_dense(
     mode: str,
     causal: bool,
     attention_mode: str,
+    prefix_tokens: int = 0,
 ):
     batch, seqlen, heads, head_dim = q.shape
     q_bhg = rearrange(q, "b s h d -> b h s d").contiguous()
@@ -446,16 +461,29 @@ def _sparse_shot_attention_dense(
         k_locals = [rearrange(ki, "h s d -> s h d") for ki in k_shots]
         v_locals = [rearrange(vi, "h s d -> s h d") for vi in v_shots]
 
+        prefix_tokens = max(int(prefix_tokens or 0), 0)
+        prefix_k = prefix_v = None
+        if prefix_tokens > 0 and len(k_locals) > 0:
+            take = min(prefix_tokens, k_locals[0].size(0))
+            if take > 0:
+                prefix_k = k_locals[0][:take]
+                prefix_v = v_locals[0][:take]
+
         k_global, v_global = _build_global_reps(k_locals, v_locals, per_g, mode)
 
         out_locals = []
-        for k_local, v_local, q_local in zip(k_locals, v_locals, q_locals):
+        for shot_idx, (k_local, v_local, q_local) in enumerate(zip(k_locals, v_locals, q_locals)):
+            parts_k = [k_local]
+            parts_v = [v_local]
             if k_global.numel() > 0:
-                k_cat = torch.cat([k_local, k_global], dim=0)
-                v_cat = torch.cat([v_local, v_global], dim=0)
-            else:
-                k_cat = k_local
-                v_cat = v_local
+                parts_k.append(k_global)
+                parts_v.append(v_global)
+            if prefix_k is not None and shot_idx != 0:
+                parts_k.append(prefix_k)
+                parts_v.append(prefix_v)
+
+            k_cat = torch.cat(parts_k, dim=0)
+            v_cat = torch.cat(parts_v, dim=0)
 
             q_chunk = rearrange(q_local, "s h d -> 1 s h d")
             k_chunk = rearrange(k_cat, "s h d -> 1 s h d")
