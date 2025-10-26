@@ -186,6 +186,152 @@ class WanVideoShotArgs:
         },)
 
 
+class WanVideoStructuredShot:
+    @classmethod
+    def INPUT_TYPES(s):
+        return {
+            "required": {
+                "shot_caption": ("STRING", {"default": "", "multiline": True, "tooltip": "镜头描述，会按添加顺序拼接。"}),
+            },
+            "optional": {
+                "shot_list": ("WANVID_STRUCT_SHOT_LIST",),
+            }
+        }
+
+    RETURN_TYPES = ("WANVID_STRUCT_SHOT", "WANVID_STRUCT_SHOT_LIST")
+    RETURN_NAMES = ("shot", "shot_list")
+    FUNCTION = "process"
+    CATEGORY = "WanVideoWrapper/Structured"
+
+    def process(self, shot_caption, shot_list=None):
+        caption = shot_caption.strip()
+        if not caption:
+            raise ValueError("Shot caption cannot be empty.")
+
+        shots = [] if shot_list is None else list(shot_list)
+        shot_index = len(shots)
+        shot_info = {
+            "index": shot_index,
+            "caption": caption,
+        }
+        shots.append(shot_info)
+        return shot_info, shots
+
+
+class WanVideoStructuredPromptEncode:
+    @classmethod
+    def INPUT_TYPES(s):
+        return {
+            "required": {
+                "global_caption": ("STRING", {"default": "", "multiline": True, "tooltip": "整体场景描述，会自动拼接到 [global caption] 段落。"}),
+                "shot_list": ("WANVID_STRUCT_SHOT_LIST",),
+                "total_frames": ("INT", {"default": 81, "min": 5, "max": 401, "step": 4, "tooltip": "最终帧数，将自动调整为 4t+1"}),
+                "negative_prompt": ("STRING", {"default": "", "multiline": True}),
+                "t5": ("WANTEXTENCODER",),
+            },
+            "optional": {
+                "custom_shot_cut_frames": ("STRING", {"default": "", "tooltip": "可选：自定义镜头切换帧，逗号/空格分隔。留空则按镜头数平均分配。"}),
+                "append_shot_summary": ("BOOLEAN", {"default": True, "tooltip": "自动在全局描述后追加 \"This scene contains N shots.\""}),
+                "force_offload": ("BOOLEAN", {"default": True}),
+                "model_to_offload": ("WANVIDEOMODEL", {"tooltip": "编码前临时卸载模型以释放显存"}),
+                "use_disk_cache": ("BOOLEAN", {"default": False, "tooltip": "启用磁盘缓存时可免加载 T5"}),
+                "device": (["gpu", "cpu"], {"default": "gpu"}),
+            }
+        }
+
+    RETURN_TYPES = ("WANVIDEOTEXTEMBEDS", "SHOTARGS", "STRING")
+    RETURN_NAMES = ("text_embeds", "shot_args", "positive_prompt")
+    FUNCTION = "process"
+    CATEGORY = "WanVideoWrapper/Structured"
+
+    def _auto_shot_cuts(self, total_frames: int, shot_count: int) -> list[int]:
+        if shot_count <= 1:
+            return []
+        cuts = []
+        step = total_frames / shot_count
+        for i in range(1, shot_count):
+            approx = max(1, round(i * step))
+            enforced = enforce_4t_plus_1(approx)
+            if enforced >= total_frames:
+                enforced = total_frames - 4
+                enforced = enforce_4t_plus_1(enforced)
+            if enforced <= 0 or enforced >= total_frames:
+                continue
+            if enforced not in cuts:
+                cuts.append(enforced)
+        return cuts
+
+    def _compose_prompt(self, global_caption: str, shots: list[dict], append_summary: bool) -> str:
+        global_text = global_caption.strip()
+        if append_summary and shots:
+            summary = f" This scene contains {len(shots)} shots."
+            if "this scene contains" not in global_text.lower():
+                global_text = (global_text + summary).strip()
+
+        prompt = f"[global caption] {global_text}" if global_text else "[global caption]"
+
+        if shots:
+            shot_texts = [shot["caption"].strip() for shot in shots]
+            per_shot = " [shot cut] ".join(shot_texts)
+            prompt = f"{prompt} [per shot caption] {per_shot}"
+
+        return prompt.strip()
+
+    def process(self, global_caption, shot_list, total_frames, negative_prompt, t5,
+                custom_shot_cut_frames="", append_shot_summary=True,
+                force_offload=True, model_to_offload=None, use_disk_cache=False, device="gpu"):
+        if not shot_list or len(shot_list) == 0:
+            raise ValueError("At least one shot is required. Please chain WanVideoStructuredShot nodes first.")
+
+        shots = sorted([dict(item) for item in shot_list], key=lambda s: s.get("index", 0))
+        total_frames = enforce_4t_plus_1(total_frames)
+
+        custom_cuts = []
+        if custom_shot_cut_frames.strip():
+            raw = parse_shot_cut_string(custom_shot_cut_frames)
+            seen = set()
+            for frame in raw:
+                enforced = enforce_4t_plus_1(frame)
+                if 0 < enforced < total_frames and enforced not in seen:
+                    custom_cuts.append(enforced)
+                    seen.add(enforced)
+
+        shot_cuts = []
+        if custom_cuts:
+            for frame in custom_cuts:
+                enforced = enforce_4t_plus_1(frame)
+                if 0 < enforced < total_frames and enforced not in shot_cuts:
+                    shot_cuts.append(enforced)
+        else:
+            shot_cuts = self._auto_shot_cuts(total_frames, len(shots))
+
+        shot_cuts.sort()
+
+        positive_prompt = self._compose_prompt(
+            global_caption,
+            shots,
+            append_shot_summary,
+        )
+
+        text_encoder = WanVideoTextEncode()
+        text_embeds, = text_encoder.process(
+            positive_prompt=positive_prompt,
+            negative_prompt=negative_prompt,
+            t5=t5,
+            force_offload=force_offload,
+            model_to_offload=model_to_offload,
+            use_disk_cache=use_disk_cache,
+            device=device,
+        )
+
+        shot_args = {
+            "total_frames": total_frames,
+            "shot_cut_frames": shot_cuts,
+        }
+
+        return text_embeds, shot_args, positive_prompt
+
+
 class WanVideoSetShotAttention:
     @classmethod
     def INPUT_TYPES(s):
@@ -2286,6 +2432,8 @@ NODE_CLASS_MAPPINGS = {
     "WanVideoSetRadialAttention": WanVideoSetRadialAttention,
     "WanVideoBlockList": WanVideoBlockList,
     "WanVideoShotArgs": WanVideoShotArgs,
+    "WanVideoStructuredShot": WanVideoStructuredShot,
+    "WanVideoStructuredPromptEncode": WanVideoStructuredPromptEncode,
     "WanVideoSetShotAttention": WanVideoSetShotAttention,
     "WanVideoTextEncodeCached": WanVideoTextEncodeCached,
     "WanVideoAddExtraLatent": WanVideoAddExtraLatent,
@@ -2328,6 +2476,8 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "WanVideoSetRadialAttention": "WanVideo Set Radial Attention",
     "WanVideoBlockList": "WanVideo Block List",
     "WanVideoShotArgs": "WanVideo Shot Args",
+    "WanVideoStructuredShot": "WanVideo Structured Shot",
+    "WanVideoStructuredPromptEncode": "WanVideo Structured Prompt Encode",
     "WanVideoSetShotAttention": "WanVideo Set Shot Attention",
     "WanVideoTextEncodeCached": "WanVideo TextEncode Cached",
     "WanVideoAddExtraLatent": "WanVideo Add Extra Latent",
