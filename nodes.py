@@ -152,7 +152,7 @@ class WanVideoBlockList:
 
 
 
-class WanVideoShotArgs:
+class WanVideoHolocineShotArgs:
     @classmethod
     def INPUT_TYPES(s):
         return {
@@ -162,10 +162,10 @@ class WanVideoShotArgs:
             }
         }
 
-    RETURN_TYPES = ("SHOTARGS",)
-    RETURN_NAMES = ("shot_args",)
+    RETURN_TYPES = ("HOLOCINE_SHOTARGS",)
+    RETURN_NAMES = ("holocine_args",)
     FUNCTION = "process"
-    CATEGORY = "WanVideoWrapper"
+    CATEGORY = "WanVideoWrapper/Holocine"
 
     def process(self, total_frames, shot_cut_frames):
         total_frames_proc = enforce_4t_plus_1(total_frames)
@@ -186,7 +186,7 @@ class WanVideoShotArgs:
         },)
 
 
-class WanVideoStructuredShot:
+class WanVideoHolocineShotBuilder:
     @classmethod
     def INPUT_TYPES(s):
         return {
@@ -194,14 +194,15 @@ class WanVideoStructuredShot:
                 "shot_caption": ("STRING", {"default": "", "multiline": True, "tooltip": "镜头描述，会按添加顺序拼接。"}),
             },
             "optional": {
-                "shot_list": ("WANVID_STRUCT_SHOT_LIST",),
+                "shot_list": ("WANVID_HOLOCINE_SHOT_LIST",),
             }
         }
 
-    RETURN_TYPES = ("WANVID_STRUCT_SHOT_LIST",)
+    RETURN_TYPES = ("WANVID_HOLOCINE_SHOT_LIST",)
     RETURN_NAMES = ("shot_list",)
     FUNCTION = "process"
-    CATEGORY = "WanVideoWrapper/Structured"
+    CATEGORY = "WanVideoWrapper/Holocine"
+    DESCRIPTION = "Build a Holocine-style structured shot list by chaining this node."
 
     def process(self, shot_caption, shot_list=None):
         caption = shot_caption.strip()
@@ -218,13 +219,13 @@ class WanVideoStructuredShot:
         return (shots,)
 
 
-class WanVideoStructuredPromptEncode:
+class WanVideoHolocinePromptEncode:
     @classmethod
     def INPUT_TYPES(s):
         return {
             "required": {
                 "global_caption": ("STRING", {"default": "", "multiline": True, "tooltip": "整体场景描述，会自动拼接到 [global caption] 段落。"}),
-                "shot_list": ("WANVID_STRUCT_SHOT_LIST",),
+                "shot_list": ("WANVID_HOLOCINE_SHOT_LIST",),
                 "total_frames": ("INT", {"default": 81, "min": 5, "max": 401, "step": 4, "tooltip": "最终帧数，将自动调整为 4t+1"}),
                 "negative_prompt": ("STRING", {"default": "", "multiline": True}),
                 "t5": ("WANTEXTENCODER",),
@@ -239,10 +240,11 @@ class WanVideoStructuredPromptEncode:
             }
         }
 
-    RETURN_TYPES = ("WANVIDEOTEXTEMBEDS", "SHOTARGS", "STRING")
-    RETURN_NAMES = ("text_embeds", "shot_args", "positive_prompt")
+    RETURN_TYPES = ("WANVIDEOTEXTEMBEDS", "HOLOCINE_SHOTARGS", "STRING")
+    RETURN_NAMES = ("text_embeds", "holocine_args", "positive_prompt")
     FUNCTION = "process"
-    CATEGORY = "WanVideoWrapper/Structured"
+    CATEGORY = "WanVideoWrapper/Holocine"
+    DESCRIPTION = "Encode Holocine structured prompt into WANVIDEOTEXTEMBEDS and HOLOCINE_SHOTARGS for shot attention pipelines."
 
     def _auto_shot_cuts(self, total_frames: int, shot_count: int) -> list[int]:
         if shot_count <= 1:
@@ -281,7 +283,7 @@ class WanVideoStructuredPromptEncode:
                 custom_shot_cut_frames="", append_shot_summary=True,
                 force_offload=True, model_to_offload=None, use_disk_cache=False, device="gpu"):
         if not shot_list or len(shot_list) == 0:
-            raise ValueError("At least one shot is required. Please chain WanVideoStructuredShot nodes first.")
+            raise ValueError("At least one shot is required. Please chain WanVideoHolocineShotBuilder nodes first.")
 
         shots = sorted([dict(item) for item in shot_list], key=lambda s: s.get("index", 0))
         total_frames = enforce_4t_plus_1(total_frames)
@@ -324,12 +326,12 @@ class WanVideoStructuredPromptEncode:
             device=device,
         )
 
-        shot_args = {
+        holocine_args = {
             "total_frames": total_frames,
             "shot_cut_frames": shot_cuts,
         }
 
-        return text_embeds, shot_args, positive_prompt
+        return text_embeds, holocine_args, positive_prompt
 
 
 class WanVideoSetShotAttention:
@@ -2434,9 +2436,9 @@ NODE_CLASS_MAPPINGS = {
     "WanVideoFreeInitArgs": WanVideoFreeInitArgs,
     "WanVideoSetRadialAttention": WanVideoSetRadialAttention,
     "WanVideoBlockList": WanVideoBlockList,
-    "WanVideoShotArgs": WanVideoShotArgs,
-    "WanVideoStructuredShot": WanVideoStructuredShot,
-    "WanVideoStructuredPromptEncode": WanVideoStructuredPromptEncode,
+    "WanVideoHolocineShotArgs": WanVideoHolocineShotArgs,
+    "WanVideoHolocineShotBuilder": WanVideoHolocineShotBuilder,
+    "WanVideoHolocinePromptEncode": WanVideoHolocinePromptEncode,
     "WanVideoSetShotAttention": WanVideoSetShotAttention,
     "WanVideoTextEncodeCached": WanVideoTextEncodeCached,
     "WanVideoAddExtraLatent": WanVideoAddExtraLatent,
@@ -2478,9 +2480,9 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "WanVideoFreeInitArgs": "WanVideo Free Init Args",
     "WanVideoSetRadialAttention": "WanVideo Set Radial Attention",
     "WanVideoBlockList": "WanVideo Block List",
-    "WanVideoShotArgs": "WanVideo Shot Args",
-    "WanVideoStructuredShot": "WanVideo Structured Shot",
-    "WanVideoStructuredPromptEncode": "WanVideo Structured Prompt Encode",
+    "WanVideoHolocineShotArgs": "WanVideo Holocine Shot Args",
+    "WanVideoHolocineShotBuilder": "WanVideo Holocine Shot Builder",
+    "WanVideoHolocinePromptEncode": "WanVideo Holocine Prompt Encode",
     "WanVideoSetShotAttention": "WanVideo Set Shot Attention",
     "WanVideoTextEncodeCached": "WanVideo TextEncode Cached",
     "WanVideoAddExtraLatent": "WanVideo Add Extra Latent",
