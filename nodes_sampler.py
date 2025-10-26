@@ -1396,6 +1396,7 @@ class WanVideoSampler:
                     "ovi_negative_text_embeds": ovi_negative_text_embeds, # Audio latent model negative text embeds for Ovi
                     "flashvsr_LQ_latent": flashvsr_LQ_latent, # FlashVSR LQ latent for upsampling
                     "flashvsr_strength": flashvsr_strength, # FlashVSR strength
+                    "num_cond_latents": len(all_indices) if transformer.is_longcat else None # number of cond latents LongCat to separate attention
                 }
 
                 batch_size = 1
