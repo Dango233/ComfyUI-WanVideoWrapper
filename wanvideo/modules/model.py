@@ -696,6 +696,7 @@ class WanT2VCrossAttention(WanSelfAttention):
         s = x.size(1)
         # compute query
         is_longcat = x.shape[-1] == 4096
+
         if is_longcat:
             if num_cond_latents is not None and num_cond_latents > 0:
                 num_cond_latents_thw = num_cond_latents * (s // grid_sizes[0][0])
@@ -720,9 +721,6 @@ class WanT2VCrossAttention(WanSelfAttention):
                 k = rope_apply_c(k, cross_freqs, inner_c).to(q)
 
             x = attention(q, k, v, attention_mode=self.attention_mode).flatten(2)
-            if is_longcat:
-                if num_cond_latents is not None and num_cond_latents > 0:
-                    x = torch.cat([torch.zeros((b, num_cond_latents_thw, x.shape[-1]), dtype=x.dtype, device=x.device), x], dim=1).contiguous()
 
         if lynx_x_ip is not None and self.ip_adapter is not None and ip_scale !=0:
             lynx_x_ip = self.ip_adapter(self, q, lynx_x_ip)
@@ -771,6 +769,9 @@ class WanT2VCrossAttention(WanSelfAttention):
             target_x = attention(q, k_target, v_target, k_lens=kwargs["target_seq_lens"]).flatten(2)
 
             x = x.add(target_x)
+
+        if is_longcat and num_cond_latents is not None and num_cond_latents > 0:
+            return torch.cat([torch.zeros((b, num_cond_latents_thw, x.shape[-1]), dtype=x.dtype, device=x.device), self.o(x)], dim=1).contiguous()
 
         return self.o(x)
 
