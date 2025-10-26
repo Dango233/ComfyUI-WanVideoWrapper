@@ -602,17 +602,17 @@ class WanVideoSampler:
                 debug_info["prompt_positions_sample"] = text_cut_positions
                 first_shot_positions = text_cut_positions
             else:
-                raise ValueError(f"Shot Attention 需要结构化提示文本，但未获取到 text_cut_positions。诊断: {debug_info}")
+                raise ValueError(f"Shot attention requires structured prompt metadata, but text_cut_positions is missing. Debug: {debug_info}")
 
             if not first_shot_positions or first_shot_positions.get('global') is None:
-                raise ValueError(f"Shot Attention 需要在 prompt 中标注 [global caption]/[per shot caption]/[shot cut]。诊断: {debug_info}")
+                raise ValueError(f"Shot attention expects [global caption]/[per shot caption]/[shot cut] tags in the prompt. Debug: {debug_info}")
 
             shot_cut_frames = holocine_args.get("shot_cut_frames", [])
             try:
                 shot_indices_tensor = build_shot_indices(latent_video_length, shot_cut_frames)
                 shot_indices_tensor = shot_indices_tensor.to(device)
             except Exception as exc:
-                raise ValueError(f"鏡頭切點解析失败: {exc}. 诊断: {debug_info}") from exc
+                raise ValueError(f"Failed to build shot indices: {exc}. Debug: {debug_info}") from exc
         else:
             first_shot_positions = None
             shot_indices_tensor = None

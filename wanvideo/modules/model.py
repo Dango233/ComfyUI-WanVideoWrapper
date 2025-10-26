@@ -2357,11 +2357,18 @@ class WanModel(torch.nn.Module):
 
         shot_attention_enabled = bool(shot_attention_cfg and shot_attention_cfg.get("enabled", False))
         shot_backend = (shot_attention_cfg.get("backend", "auto") if shot_attention_enabled else "auto").lower()
-        shot_global_tokens = int(shot_attention_cfg.get("global_tokens", 0)) if shot_attention_enabled else 0
+        raw_global_tokens = shot_attention_cfg.get("global_tokens", None) if shot_attention_enabled else None
+        auto_global_tokens = shot_attention_enabled and (raw_global_tokens is None or (isinstance(raw_global_tokens, (int, float)) and raw_global_tokens <= 0))
+        shot_global_tokens = None
+        if shot_attention_enabled and not auto_global_tokens:
+            if isinstance(raw_global_tokens, (int, float)):
+                shot_global_tokens = int(raw_global_tokens)
+            else:
+                raise ValueError(f"Shot attention received unsupported global_tokens value: {raw_global_tokens!r}")
         shot_mode = shot_attention_cfg.get("mode", "firstk") if shot_attention_enabled else "firstk"
         if shot_attention_enabled:
-            if shot_backend != "full" and shot_global_tokens <= 0:
-                raise ValueError("Shot attention is enabled but global_tokens is ≤ 0. Set a positive value in WanVideoHolocineSetShotAttention.")
+            if shot_backend != "full" and not auto_global_tokens and shot_global_tokens <= 0:
+                raise ValueError("Shot attention is enabled but global_tokens is ≤ 0. Set a positive value in WanVideoHolocineSetShotAttention or use auto mode (0).")
             if shot_indices is None:
                 raise ValueError("Shot attention is enabled but shot_indices are missing. Ensure WanVideoHolocineShotArgs/Holocine Prompt nodes are connected.")
             if isinstance(shot_indices, torch.Tensor):
@@ -2501,13 +2508,16 @@ class WanModel(torch.nn.Module):
             if shot_attention_cfg.get("i2v_mode"):
                 prefix_tokens = spatial_tokens
 
+            pooled_tokens = spatial_tokens if auto_global_tokens else shot_global_tokens
             shot_block_config = {
                 "indices": shot_latent_cuts,
-                "global_tokens": shot_global_tokens,
+                "global_tokens": pooled_tokens,
                 "mode": shot_mode,
                 "backend": shot_backend,
                 "prefix_tokens": prefix_tokens,
             }
+            if auto_global_tokens:
+                shot_block_config["auto_global_tokens"] = True
 
         x = [u.flatten(2).transpose(1, 2) for u in x]
         self.original_seq_len = x[0].shape[1]
