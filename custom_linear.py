@@ -101,7 +101,7 @@ class CustomLinear(nn.Linear):
 
         return torch.nn.functional.linear(input, weight, bias)
 
-    @torch.compiler.disable()
+    #@torch.compiler.disable()
     def apply_lora(self, weight):
         for lora_diff, lora_strength in zip(self.lora[0], self.lora[1]):
             if isinstance(lora_strength, list):
