@@ -157,8 +157,11 @@ class WanVideoHolocineShotArgs:
     def INPUT_TYPES(s):
         return {
             "required": {
-                "image_embeds": ("WANVIDIMAGE_EMBEDS", {"tooltip": "Image embeds produced by WanVideoEmptyEmbeds (or equivalent) for frame inference."}),
                 "shot_cut_frames": ("STRING", {"default": "40, 80", "tooltip": "Comma or space separated frame indices where a new shot begins."}),
+            },
+            "optional": {
+                "image_embeds": ("WANVIDIMAGE_EMBEDS", {"tooltip": "Image embeds produced by WanVideoEmptyEmbeds (or equivalent) for frame inference."}),
+                "total_frames": ("INT", {"default": 241, "min": 5, "max": 4097, "step": 4, "tooltip": "Optional override for total pixel frames (4t+1 enforced)."}),
             }
         }
 
@@ -167,23 +170,27 @@ class WanVideoHolocineShotArgs:
     FUNCTION = "process"
     CATEGORY = "WanVideoWrapper/Holocine"
 
-    def process(self, image_embeds, shot_cut_frames):
-        total_frames = image_embeds.get("num_frames") if isinstance(image_embeds, dict) else None
-        if torch.is_tensor(total_frames):
-            total_frames = int(total_frames.item())
+    def process(self, shot_cut_frames, image_embeds=None, total_frames=241):
+        inferred_frames = None
+        if isinstance(image_embeds, dict):
+            inferred_frames = image_embeds.get("num_frames")
+            if torch.is_tensor(inferred_frames):
+                inferred_frames = int(inferred_frames.item())
+            if inferred_frames is None:
+                target_shape = image_embeds.get("target_shape")
+                if target_shape is not None and len(target_shape) >= 2:
+                    latent_frames = target_shape[1]
+                    if torch.is_tensor(latent_frames):
+                        latent_frames = int(latent_frames.item())
+                    inferred_frames = 1 + (latent_frames - 1) * VAE_STRIDE[0]
 
-        if total_frames is None:
-            target_shape = image_embeds.get("target_shape") if isinstance(image_embeds, dict) else None
-            if target_shape is not None and len(target_shape) >= 2:
-                latent_frames = target_shape[1]
-                if torch.is_tensor(latent_frames):
-                    latent_frames = int(latent_frames.item())
-                total_frames = 1 + (latent_frames - 1) * VAE_STRIDE[0]
+        if inferred_frames is None and total_frames is not None:
+            inferred_frames = total_frames
 
-        if total_frames is None:
-            raise ValueError("Failed to infer frame count from image_embeds. Please connect WanVideoEmptyEmbeds or an equivalent output that provides num_frames.")
+        if inferred_frames is None:
+            inferred_frames = 241
 
-        total_frames_proc = enforce_4t_plus_1(total_frames)
+        total_frames_proc = enforce_4t_plus_1(int(inferred_frames))
         try:
             raw_cuts = parse_shot_cut_string(shot_cut_frames)
         except ValueError as exc:
@@ -243,9 +250,10 @@ class WanVideoHolocinePromptEncode:
                 "shot_list": ("WANVID_HOLOCINE_SHOT_LIST",),
                 "negative_prompt": ("STRING", {"default": "", "multiline": True}),
                 "t5": ("WANTEXTENCODER",),
-                "image_embeds": ("WANVIDIMAGE_EMBEDS", {"tooltip": "Image embeds produced by WanVideoEmptyEmbeds (or equivalent) for frame inference."}),
             },
             "optional": {
+                "image_embeds": ("WANVIDIMAGE_EMBEDS", {"tooltip": "Image embeds produced by WanVideoEmptyEmbeds (or equivalent) for frame inference."}),
+                "total_frames": ("INT", {"default": 241, "min": 5, "max": 4097, "step": 4, "tooltip": "Optional override for total pixel frames (4t+1 enforced)."}),
                 "custom_shot_cut_frames": ("STRING", {"default": "", "tooltip": "可选：自定义镜头切换帧，逗号/空格分隔。留空则按镜头数平均分配。"}),
                 "append_shot_summary": ("BOOLEAN", {"default": True, "tooltip": "自动在全局描述后追加 \"This scene contains N shots.\""}),
                 "force_offload": ("BOOLEAN", {"default": True}),
@@ -294,26 +302,33 @@ class WanVideoHolocinePromptEncode:
 
         return prompt.strip()
 
-    def process(self, global_caption, shot_list, negative_prompt, t5, image_embeds,
+    def process(self, global_caption, shot_list, negative_prompt, t5, image_embeds=None, total_frames=241,
                 custom_shot_cut_frames="", append_shot_summary=True,
                 force_offload=True, model_to_offload=None, use_disk_cache=False, device="gpu"):
         if not shot_list or len(shot_list) == 0:
             raise ValueError("At least one shot is required. Please chain WanVideoHolocineShotBuilder nodes first.")
 
         shots = sorted([dict(item) for item in shot_list], key=lambda s: s.get("index", 0))
-        total_frames = image_embeds.get("num_frames") if isinstance(image_embeds, dict) else None
-        if torch.is_tensor(total_frames):
-            total_frames = int(total_frames.item())
-        if total_frames is None:
-            target_shape = image_embeds.get("target_shape") if isinstance(image_embeds, dict) else None
-            if target_shape is not None and len(target_shape) >= 2:
-                latent_frames = target_shape[1]
-                if torch.is_tensor(latent_frames):
-                    latent_frames = int(latent_frames.item())
-                total_frames = 1 + (latent_frames - 1) * VAE_STRIDE[0]
-        if total_frames is None:
-            raise ValueError("Failed to infer frame count from image_embeds. Please connect WanVideoEmptyEmbeds or an equivalent output that provides num_frames.")
-        total_frames = enforce_4t_plus_1(total_frames)
+        inferred_frames = None
+        if isinstance(image_embeds, dict):
+            inferred_frames = image_embeds.get("num_frames")
+            if torch.is_tensor(inferred_frames):
+                inferred_frames = int(inferred_frames.item())
+            if inferred_frames is None:
+                target_shape = image_embeds.get("target_shape")
+                if target_shape is not None and len(target_shape) >= 2:
+                    latent_frames = target_shape[1]
+                    if torch.is_tensor(latent_frames):
+                        latent_frames = int(latent_frames.item())
+                    inferred_frames = 1 + (latent_frames - 1) * VAE_STRIDE[0]
+
+        if inferred_frames is None and total_frames is not None:
+            inferred_frames = total_frames
+
+        if inferred_frames is None:
+            inferred_frames = 241
+
+        total_frames = enforce_4t_plus_1(int(inferred_frames))
 
         custom_cuts = []
         if custom_shot_cut_frames.strip():
@@ -368,7 +383,7 @@ class WanVideoHolocineSetShotAttention:
             "required": {
                 "model": ("WANVIDEOMODEL",),
                 "enable": ("BOOLEAN", {"default": False, "tooltip": "Toggle shot-aware sparse attention."}),
-                "global_tokens": ("INT", {"default": 64, "min": 0, "max": 512, "step": 1, "tooltip": "Number of shared tokens pooled per shot."}),
+                "global_tokens": ("INT", {"default": 0, "min": 0, "max": 8192, "step": 1, "tooltip": "Per-shot pooled tokens (0 = auto)."}),
             },
             "optional": {
                 "pooling_mode": (["firstk", "linspace", "mean"], {"default": "firstk", "tooltip": "Representative selection strategy per shot."}),
@@ -391,7 +406,7 @@ class WanVideoHolocineSetShotAttention:
         transformer_options = patcher.model_options.setdefault("transformer_options", {})
         transformer_options["shot_attention"] = {
             "enabled": bool(enable),
-            "global_tokens": int(global_tokens),
+            "global_tokens": int(global_tokens) if global_tokens > 0 else None,
             "mode": pooling_mode,
             "mask_type": mask_type,
             "backend": backend,
