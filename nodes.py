@@ -398,11 +398,17 @@ class WanVideoHolocineSetShotAttention:
     CATEGORY = "WanVideoWrapper/Holocine"
 
     def apply(self, model, enable, global_token_ratio_or_number, pooling_mode="firstk", mask_type="none", backend="auto", i2v_mode=False):
+        value = float(global_token_ratio_or_number)
+        if value <= 0.0:
+            raise ValueError("global_token_ratio_or_number must be > 0. Use values ≤ 1.0 for ratios or integers ≥ 64 for absolute counts.")
+        if value > 1.0:
+            if abs(value - round(value)) > 1e-6 or value < 64.0:
+                raise ValueError("global_token_ratio_or_number > 1.0 requires an integer ≥ 64.")
         patcher = model.clone()
         transformer_options = patcher.model_options.setdefault("transformer_options", {})
         transformer_options["shot_attention"] = {
             "enabled": bool(enable),
-            "global_token_ratio_or_number": float(global_token_ratio_or_number),
+            "global_token_ratio_or_number": value,
             "mode": pooling_mode,
             "mask_type": mask_type,
             "backend": backend,
