@@ -2545,6 +2545,40 @@ class WanModel(torch.nn.Module):
             render_latent = torch.cat([hidden_states[:, :20], render_latent], dim=1)
 
         # patch embed
+        # Append shot mask feature (Holocine-style) when available and supported
+        mask_mode = (shot_mask_type or "none").lower() if shot_mask_type is not None else "none"
+        if mask_mode not in ("none", "") and shot_indices_tensor is not None and isinstance(x, (list, tuple)) and len(x) > 0:
+            sample_channels = x[0].shape[0]
+            expected_in_channels = self.original_patch_embedding.weight.shape[1]
+            if expected_in_channels == sample_channels + 1:
+                mask_values = None
+                num_shots = int(shot_indices_tensor.max().item()) + 1 if shot_indices_tensor.numel() > 0 else 0
+                shot_indices_float = shot_indices_tensor.to(x[0].dtype)
+                if mask_mode == "id":
+                    mask_values = shot_indices_float
+                elif mask_mode == "normalized":
+                    if num_shots > 1:
+                        denom = float(max(num_shots - 1, 1))
+                        mask_values = shot_indices_float / denom
+                    else:
+                        mask_values = torch.zeros_like(shot_indices_float)
+                elif mask_mode == "alternating":
+                    mask_values = (shot_indices_tensor % 2).to(x[0].dtype)
+
+                if mask_values is not None:
+                    # Expand to [B, 1, F, H, W] to concatenate per sample
+                    batch_count, latent_frames = mask_values.shape
+                    _, _, height, width = x[0].shape
+                    mask_expanded = mask_values.view(batch_count, 1, latent_frames, 1, 1).expand(batch_count, 1, latent_frames, height, width)
+                    x = [torch.cat([latent, mask_expanded[i]], dim=0) if i < batch_count else latent for i, latent in enumerate(x)]
+            else:
+                log.debug(
+                    "Shot mask requested with mode '%s' but patch embedding expects %d channels (current %d). Skipping mask feature.",
+                    mask_mode,
+                    expected_in_channels,
+                    sample_channels,
+                )
+
         if control_lora_enabled:
             self.expanded_patch_embedding.to(self.main_device)
             x = [self.expanded_patch_embedding(u.unsqueeze(0).to(torch.float32)).to(x[0].dtype) for u in x]
