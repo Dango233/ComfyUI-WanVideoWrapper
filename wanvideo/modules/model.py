@@ -2492,18 +2492,28 @@ class WanModel(torch.nn.Module):
 
         shot_attention_enabled = bool(shot_attention_cfg and shot_attention_cfg.get("enabled", False))
         shot_backend = (shot_attention_cfg.get("backend", "auto") if shot_attention_enabled else "auto").lower()
-        raw_global_tokens = shot_attention_cfg.get("global_tokens", None) if shot_attention_enabled else None
-        auto_global_tokens = shot_attention_enabled and (raw_global_tokens is None or (isinstance(raw_global_tokens, (int, float)) and raw_global_tokens <= 0))
-        shot_global_tokens = None
-        if shot_attention_enabled and not auto_global_tokens:
-            if isinstance(raw_global_tokens, (int, float)):
-                shot_global_tokens = int(raw_global_tokens)
+        token_mode = None
+        token_ratio = None
+        token_absolute = None
+        if shot_attention_enabled:
+            raw_token_value = shot_attention_cfg.get("global_token_ratio_or_number", 0.25)
+            if not isinstance(raw_token_value, (int, float)):
+                raise ValueError(f"Shot attention expected a numeric global_token_ratio_or_number value, got {type(raw_token_value).__name__} instead.")
+            raw_token_value = float(raw_token_value)
+            if raw_token_value <= 0.0:
+                raise ValueError("Shot attention requires global_token_ratio_or_number to be > 0.")
+            if raw_token_value <= 1.0:
+                token_mode = "ratio"
+                token_ratio = raw_token_value
             else:
-                raise ValueError(f"Shot attention received unsupported global_tokens value: {raw_global_tokens!r}")
+                if abs(raw_token_value - round(raw_token_value)) > 1e-6 or raw_token_value < 64:
+                    raise ValueError("Shot attention numeric mode expects an integer ≥ 64 when global_token_ratio_or_number > 1.")
+                token_mode = "absolute"
+                token_absolute = int(round(raw_token_value))
         shot_mode = shot_attention_cfg.get("mode", "firstk") if shot_attention_enabled else "firstk"
         if shot_attention_enabled:
-            if shot_backend != "full" and not auto_global_tokens and shot_global_tokens <= 0:
-                raise ValueError("Shot attention is enabled but global_tokens is ≤ 0. Set a positive value in WanVideoHolocineSetShotAttention or use auto mode (0).")
+            if shot_backend != "full" and token_mode is None:
+                raise ValueError("Shot attention requires global_token_ratio_or_number to be set (ratio ≤ 1.0 or integer ≥ 64).")
             if shot_indices is None:
                 raise ValueError("Shot attention is enabled but shot_indices are missing. Ensure WanVideoHolocineShotArgs/Holocine Prompt nodes are connected.")
             if isinstance(shot_indices, torch.Tensor):
@@ -2643,7 +2653,13 @@ class WanModel(torch.nn.Module):
             if shot_attention_cfg.get("i2v_mode"):
                 prefix_tokens = spatial_tokens
 
-            pooled_tokens = spatial_tokens if auto_global_tokens else shot_global_tokens
+            if token_mode == "ratio":
+                pooled_tokens = max(1, int(math.ceil(spatial_tokens * token_ratio)))
+            elif token_mode == "absolute":
+                pooled_tokens = token_absolute
+            else:
+                pooled_tokens = spatial_tokens  # fallback when backend == "full"
+            pooled_tokens = max(1, min(spatial_tokens, pooled_tokens))
             shot_block_config = {
                 "indices": shot_latent_cuts,
                 "global_tokens": pooled_tokens,
@@ -2651,8 +2667,12 @@ class WanModel(torch.nn.Module):
                 "backend": shot_backend,
                 "prefix_tokens": prefix_tokens,
             }
-            if auto_global_tokens:
-                shot_block_config["auto_global_tokens"] = True
+            if token_mode is not None:
+                shot_block_config["token_mode"] = token_mode
+                if token_mode == "ratio":
+                    shot_block_config["token_ratio"] = token_ratio
+                else:
+                    shot_block_config["token_absolute"] = token_absolute
 
         x = [u.flatten(2).transpose(1, 2) for u in x]
         self.original_seq_len = x[0].shape[1]
