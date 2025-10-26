@@ -694,7 +694,7 @@ class WanT2VCrossAttention(WanSelfAttention):
                 adapter_proj=None, adapter_attn_mask=None, ip_scale=1.0, orig_seq_len=None, lynx_x_ip=None, lynx_ip_scale=1.0, **kwargs):
         b, n, d = x.size(0), self.num_heads, self.head_dim
         # compute query
-        if d == 4096: #longcat
+        if x.shape[-1] == 4096: #longcat
             q = self.norm_q(self.q(x).view(b, -1, n, d))
         else:
             q = self.norm_q(self.q(x),num_chunks=2 if rope_func == "comfy_chunked" else 1).view(b, -1, n, d)
@@ -702,7 +702,7 @@ class WanT2VCrossAttention(WanSelfAttention):
         if nag_context is not None and not is_uncond:
             x = self.normalized_attention_guidance(b, n, d, q, context, nag_context, nag_params)
         else:
-            if d == 4096:
+            if x.shape[-1] == 4096:
                 k = self.norm_k(self.k(context).view(b, -1, n, d))
             else:
                 k = self.norm_k(self.k(context)).view(b, -1, n, d)
