@@ -20,6 +20,7 @@ scheduler_list = [
     "dpm++", "dpm++/beta",
     "dpm++_sde", "dpm++_sde/beta",
     "euler", "euler/beta",
+    "longcat_distill_euler",
     "deis",
     "lcm", "lcm/beta",
     "res_multistep",
@@ -42,12 +43,24 @@ def get_scheduler(scheduler, steps, start_step, end_step, shift, device, transfo
             sample_scheduler.timesteps = (sample_scheduler.sigmas[:-1] * 1000).to(torch.int64).to(device)
             sample_scheduler.num_inference_steps = len(sample_scheduler.timesteps)
 
-    elif scheduler in ['euler/beta', 'euler']:
-        sample_scheduler = FlowMatchEulerDiscreteScheduler(shift=shift, use_beta_sigmas=(scheduler == 'euler/beta'))
-        if flowedit_args: #seems to work better
-            timesteps, _ = retrieve_timesteps(sample_scheduler, device=device, sigmas=get_sampling_sigmas(steps, shift))
+    elif scheduler in ['euler/beta', 'euler', 'longcat_distill_euler']:
+        if 'longcat' in scheduler:
+            num_distill_sample_steps = 50
+            sample_scheduler = FlowMatchEulerDiscreteScheduler(shift=shift, time_shift_type="linear")
+            distill_indices = torch.arange(1, num_distill_sample_steps + 1, dtype=torch.float32)
+            distill_indices = (distill_indices * (1000 // num_distill_sample_steps)).round().long()
+
+            inference_indices = torch.linspace(0, num_distill_sample_steps, steps+1)[:-1]
+            inference_indices = torch.floor(inference_indices).to(torch.int64)
+
+            sigmas = torch.flip(distill_indices, [0])[inference_indices].float() / 1000
+            sample_scheduler.set_timesteps(steps, device=device, sigmas=sigmas)
         else:
-            sample_scheduler.set_timesteps(steps, device=device, sigmas=sigmas[:-1].tolist() if sigmas is not None else None)
+            sample_scheduler = FlowMatchEulerDiscreteScheduler(shift=shift, use_beta_sigmas=(scheduler == 'euler/beta'))
+            if flowedit_args: #seems to work better
+                timesteps, _ = retrieve_timesteps(sample_scheduler, device=device, sigmas=get_sampling_sigmas(steps, shift))
+            else:
+                sample_scheduler.set_timesteps(steps, device=device, sigmas=sigmas)
     elif 'dpm' in scheduler:
         if 'sde' in scheduler:
             algorithm_type = "sde-dpmsolver++"

@@ -1695,7 +1695,7 @@ class WanVideoSampler:
                     current_step_percentage = idx / len(timesteps)
 
                     timestep = torch.tensor([t]).to(device)
-                    if is_pusa or (is_5b and all_indices):
+                    if is_pusa or ((is_5b or transformer.is_longcat) and all_indices):
                         orig_timestep = timestep
                         timestep = timestep.unsqueeze(1).repeat(1, latent_video_length)
                         if extra_latents is not None:
@@ -2946,7 +2946,10 @@ class WanVideoSampler:
                         if use_tsr:
                             noise_pred = temporal_score_rescaling(noise_pred, latent, timestep, tsr_k, tsr_sigma)
 
-                        if len(timestep.shape) != 1 and not is_pusa: #5b
+                        if transformer.is_longcat:
+                            noise_pred = -noise_pred
+
+                        if len(timestep.shape) != 1 and not is_pusa: #5b and longcat
                             # all_indices is a list of indices to skip
                             total_indices = list(range(latent.shape[1]))
                             process_indices = [i for i in total_indices if i not in all_indices]

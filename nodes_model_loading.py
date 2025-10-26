@@ -1174,8 +1174,13 @@ class WanVideoModelLoader:
         in_features = sd["blocks.0.self_attn.k.weight"].shape[1]
         out_features = sd["blocks.0.self_attn.k.weight"].shape[0]
         log.info(f"Detected model in_channels: {in_channels}")
-        ffn_dim = sd["blocks.0.ffn.0.bias"].shape[0]
-        ffn2_dim = sd["blocks.0.ffn.2.weight"].shape[1]
+
+        if "blocks.0.ffn.0.bias" in sd:
+            ffn_dim = sd["blocks.0.ffn.0.bias"].shape[0]
+            ffn2_dim = sd["blocks.0.ffn.2.weight"].shape[1]
+        else:
+            ffn_dim = sd["blocks.0.ffn.w1.weight"].shape[0]
+            ffn2_dim = sd["blocks.0.ffn.w1.weight"].shape[1]
 
         patch_size=(1, 2, 2)
         if "patch_embedding.0.weight" in sd:
@@ -1222,6 +1227,9 @@ class WanVideoModelLoader:
             num_layers = 30
             out_dim = 48
             model_type = "t2v" #5B no img crossattn
+        elif dim == 4096: #longcat
+            num_heads = 32
+            num_layers = 48
         else: #1.3B
             num_heads = 12
             num_layers = 30
@@ -1335,6 +1343,7 @@ class WanVideoModelLoader:
             "rms_norm_function": rms_norm_function,
             "lynx_ip_layers": lynx_ip_layers,
             "lynx_ref_layers": lynx_ref_layers,
+            "is_longcat": dim == 4096,
 
         }
 
