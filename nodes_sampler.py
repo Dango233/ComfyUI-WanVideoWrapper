@@ -188,7 +188,7 @@ class WanVideoSampler:
                 raise ValueError("Holocine shot attention was enabled during model load, but Holocine shot args are missing.")
         else:
             if args_present:
-                raise ValueError("Holocine shot args detected, but shot attention was not enabled in WanVideoSetShotAttention")
+                raise ValueError("Holocine shot args detected, but shot attention was not enabled in WanVideoHolocineSetShotAttention")
 
         if not model_shot_enabled:
             shot_attention_cfg = None
