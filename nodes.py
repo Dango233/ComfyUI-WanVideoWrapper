@@ -157,11 +157,8 @@ class WanVideoHolocineShotArgs:
     def INPUT_TYPES(s):
         return {
             "required": {
-                "shot_cut_frames": ("STRING", {"default": "40, 80", "tooltip": "Comma or space separated frame indices where a new shot begins."}),
-            },
-            "optional": {
                 "image_embeds": ("WANVIDIMAGE_EMBEDS", {"tooltip": "Image embeds produced by WanVideoEmptyEmbeds (or equivalent) for frame inference."}),
-                "total_frames": ("INT", {"default": 241, "min": 5, "max": 4097, "step": 4, "tooltip": "Optional override for total pixel frames (4t+1 enforced)."}),
+                "shot_cut_frames": ("STRING", {"default": "40, 80", "tooltip": "Comma or space separated frame indices where a new shot begins."}),
             }
         }
 
@@ -170,7 +167,7 @@ class WanVideoHolocineShotArgs:
     FUNCTION = "process"
     CATEGORY = "WanVideoWrapper/Holocine"
 
-    def process(self, shot_cut_frames, image_embeds=None, total_frames=241):
+    def process(self, image_embeds, shot_cut_frames):
         inferred_frames = None
         if isinstance(image_embeds, dict):
             inferred_frames = image_embeds.get("num_frames")
@@ -184,11 +181,8 @@ class WanVideoHolocineShotArgs:
                         latent_frames = int(latent_frames.item())
                     inferred_frames = 1 + (latent_frames - 1) * VAE_STRIDE[0]
 
-        if inferred_frames is None and total_frames is not None:
-            inferred_frames = total_frames
-
         if inferred_frames is None:
-            inferred_frames = 241
+            raise ValueError("Failed to infer frame count from image_embeds. Please connect WanVideoEmptyEmbeds or an equivalent output that provides num_frames.")
 
         total_frames_proc = enforce_4t_plus_1(int(inferred_frames))
         try:
@@ -250,10 +244,9 @@ class WanVideoHolocinePromptEncode:
                 "shot_list": ("WANVID_HOLOCINE_SHOT_LIST",),
                 "negative_prompt": ("STRING", {"default": "", "multiline": True}),
                 "t5": ("WANTEXTENCODER",),
+                "image_embeds": ("WANVIDIMAGE_EMBEDS", {"tooltip": "Image embeds produced by WanVideoEmptyEmbeds (or equivalent) for frame inference."}),
             },
             "optional": {
-                "image_embeds": ("WANVIDIMAGE_EMBEDS", {"tooltip": "Image embeds produced by WanVideoEmptyEmbeds (or equivalent) for frame inference."}),
-                "total_frames": ("INT", {"default": 241, "min": 5, "max": 4097, "step": 4, "tooltip": "Optional override for total pixel frames (4t+1 enforced)."}),
                 "custom_shot_cut_frames": ("STRING", {"default": "", "tooltip": "可选：自定义镜头切换帧，逗号/空格分隔。留空则按镜头数平均分配。"}),
                 "append_shot_summary": ("BOOLEAN", {"default": True, "tooltip": "自动在全局描述后追加 \"This scene contains N shots.\""}),
                 "force_offload": ("BOOLEAN", {"default": True}),
@@ -302,7 +295,7 @@ class WanVideoHolocinePromptEncode:
 
         return prompt.strip()
 
-    def process(self, global_caption, shot_list, negative_prompt, t5, image_embeds=None, total_frames=241,
+    def process(self, global_caption, shot_list, negative_prompt, t5, image_embeds,
                 custom_shot_cut_frames="", append_shot_summary=True,
                 force_offload=True, model_to_offload=None, use_disk_cache=False, device="gpu"):
         if not shot_list or len(shot_list) == 0:
@@ -322,11 +315,8 @@ class WanVideoHolocinePromptEncode:
                         latent_frames = int(latent_frames.item())
                     inferred_frames = 1 + (latent_frames - 1) * VAE_STRIDE[0]
 
-        if inferred_frames is None and total_frames is not None:
-            inferred_frames = total_frames
-
         if inferred_frames is None:
-            inferred_frames = 241
+            raise ValueError("Failed to infer frame count from image_embeds. Please connect WanVideoEmptyEmbeds or an equivalent output that provides num_frames.")
 
         total_frames = enforce_4t_plus_1(int(inferred_frames))
 
@@ -383,7 +373,13 @@ class WanVideoHolocineSetShotAttention:
             "required": {
                 "model": ("WANVIDEOMODEL",),
                 "enable": ("BOOLEAN", {"default": False, "tooltip": "Toggle shot-aware sparse attention."}),
-                "global_tokens": ("INT", {"default": 0, "min": 0, "max": 8192, "step": 1, "tooltip": "Per-shot pooled tokens (0 = auto)."}),
+                "global_token_ratio_or_number": ("FLOAT", {
+                    "default": 0.25,
+                    "min": 0.0,
+                    "max": 32768.0,
+                    "step": 0.01,
+                    "tooltip": "≤1.0 => ratio of spatial tokens per shot; ≥64 (integer) => absolute token count.",
+                }),
             },
             "optional": {
                 "pooling_mode": (["firstk", "linspace", "mean"], {"default": "firstk", "tooltip": "Representative selection strategy per shot."}),
@@ -401,12 +397,12 @@ class WanVideoHolocineSetShotAttention:
     FUNCTION = "apply"
     CATEGORY = "WanVideoWrapper/Holocine"
 
-    def apply(self, model, enable, global_tokens, pooling_mode="firstk", mask_type="none", backend="auto", i2v_mode=False):
+    def apply(self, model, enable, global_token_ratio_or_number, pooling_mode="firstk", mask_type="none", backend="auto", i2v_mode=False):
         patcher = model.clone()
         transformer_options = patcher.model_options.setdefault("transformer_options", {})
         transformer_options["shot_attention"] = {
             "enabled": bool(enable),
-            "global_tokens": int(global_tokens) if global_tokens > 0 else None,
+            "global_token_ratio_or_number": float(global_token_ratio_or_number),
             "mode": pooling_mode,
             "mask_type": mask_type,
             "backend": backend,
