@@ -334,7 +334,7 @@ class WanVideoHolocinePromptEncode:
         return text_embeds, holocine_args, positive_prompt
 
 
-class WanVideoSetShotAttention:
+class WanVideoHolocineSetShotAttention:
     @classmethod
     def INPUT_TYPES(s):
         return {
@@ -357,7 +357,7 @@ class WanVideoSetShotAttention:
     RETURN_TYPES = ("WANVIDEOMODEL",)
     RETURN_NAMES = ("model",)
     FUNCTION = "apply"
-    CATEGORY = "WanVideoWrapper"
+    CATEGORY = "WanVideoWrapper/Holocine"
 
     def apply(self, model, enable, global_tokens, pooling_mode="firstk", mask_type="none", backend="auto", i2v_mode=False):
         patcher = model.clone()
@@ -2437,7 +2437,7 @@ NODE_CLASS_MAPPINGS = {
     "WanVideoHolocineShotArgs": WanVideoHolocineShotArgs,
     "WanVideoHolocineShotBuilder": WanVideoHolocineShotBuilder,
     "WanVideoHolocinePromptEncode": WanVideoHolocinePromptEncode,
-    "WanVideoSetShotAttention": WanVideoSetShotAttention,
+    "WanVideoHolocineSetShotAttention": WanVideoHolocineSetShotAttention,
     "WanVideoTextEncodeCached": WanVideoTextEncodeCached,
     "WanVideoAddExtraLatent": WanVideoAddExtraLatent,
     "WanVideoScheduler": WanVideoScheduler,
@@ -2481,7 +2481,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "WanVideoHolocineShotArgs": "WanVideo Holocine Shot Args",
     "WanVideoHolocineShotBuilder": "WanVideo Holocine Shot Builder",
     "WanVideoHolocinePromptEncode": "WanVideo Holocine Prompt Encode",
-    "WanVideoSetShotAttention": "WanVideo Set Shot Attention",
+    "WanVideoHolocineSetShotAttention": "WanVideo Holocine Set Shot Attention",
     "WanVideoTextEncodeCached": "WanVideo TextEncode Cached",
     "WanVideoAddExtraLatent": "WanVideo Add Extra Latent",
     "WanVideoAddStandInLatent": "WanVideo Add StandIn Latent",
