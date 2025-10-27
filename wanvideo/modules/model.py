@@ -712,11 +712,23 @@ class WanT2VCrossAttention(WanSelfAttention):
         # compute query
         q = self.norm_q(self.q(x),num_chunks=2 if rope_func == "comfy_chunked" else 1).view(b, -1, n, d)
 
-        if nag_context is not None and not is_uncond:
-            x = self.normalized_attention_guidance(b, n, d, q, context, nag_context, nag_params)
+        clip_len = clip_embed.shape[1] if clip_embed is not None else 0
+        if context is None:
+            raise ValueError("Cross attention requires text context, but none was provided.")
+
+        if clip_len > 0 and context.shape[1] >= clip_len:
+            text_context = context[:, clip_len:, :]
         else:
-            k = self.norm_k(self.k(context)).view(b, -1, n, d)
-            v = self.v(context).view(b, -1, n, d)
+            text_context = context
+
+        if text_context.shape[1] == 0:
+            raise ValueError("Text context is empty after removing image tokens; cannot perform cross attention.")
+
+        if nag_context is not None and not is_uncond:
+            x = self.normalized_attention_guidance(b, n, d, q, text_context, nag_context, nag_params)
+        else:
+            k = self.norm_k(self.k(text_context)).view(b, -1, n, d)
+            v = self.v(text_context).view(b, -1, n, d)
 
             #EchoShot rope
             if inner_t is not None and cross_freqs is not None and not is_uncond:
@@ -797,12 +809,24 @@ class WanI2VCrossAttention(WanSelfAttention):
         # compute query
         q = self.norm_q(self.q(x),num_chunks=2 if rope_func == "comfy_chunked" else 1).view(b, -1, n, d)
 
+        clip_len = clip_embed.shape[1] if clip_embed is not None else 0
+        if context is None:
+            raise ValueError("Cross attention requires text context, but none was provided.")
+
+        if clip_len > 0 and context.shape[1] >= clip_len:
+            text_context = context[:, clip_len:, :]
+        else:
+            text_context = context
+
+        if text_context.shape[1] == 0:
+            raise ValueError("Text context is empty after removing image tokens; cannot perform cross attention.")
+
         if nag_context is not None and not is_uncond:
-            x_text = self.normalized_attention_guidance(b, n, d, q, context, nag_context, nag_params)
+            x_text = self.normalized_attention_guidance(b, n, d, q, text_context, nag_context, nag_params)
         else:
             # text attention
-            k = self.norm_k(self.k(context)).view(b, -1, n, d)
-            v = self.v(context).view(b, -1, n, d)
+            k = self.norm_k(self.k(text_context)).view(b, -1, n, d)
+            v = self.v(text_context).view(b, -1, n, d)
             x_text = attention(q, k, v, attention_mode=self.attention_mode).flatten(2)
 
         #img attention
@@ -2784,12 +2808,17 @@ class WanModel(torch.nn.Module):
             context = None
 
         clip_embed = None
+        clip_token_count = 0
         if clip_fea is not None and hasattr(self, "img_emb"):
             clip_fea = clip_fea.to(self.main_device)
             if self.offload_img_emb:
                 self.img_emb.to(self.main_device)
             clip_embed = self.img_emb(clip_fea)  # bs x 257 x dim
-            #context = torch.concat([context_clip, context], dim=1)
+            clip_token_count = clip_embed.shape[1]
+            if context is not None:
+                if clip_embed.dtype != context.dtype:
+                    clip_embed = clip_embed.to(context.dtype)
+                context = torch.cat([clip_embed, context], dim=1)
             if self.offload_img_emb:
                 self.img_emb.to(self.offload_device, non_blocking=self.use_non_blocking)
 
@@ -2803,6 +2832,7 @@ class WanModel(torch.nn.Module):
                     spatial_tokens=spatial_tokens,
                     device=x[0].device,
                     dtype=x[0].dtype,
+                    num_image_tokens=clip_token_count,
                 )
             except Exception as exc:
                 raise ValueError(f"Failed to build cross-attention mask for shot attention: {exc}") from exc
