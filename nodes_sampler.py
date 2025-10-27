@@ -89,11 +89,29 @@ def prepare_shot_lora_payload(base_model, shot_lora_specs):
             patch_dict = comfy_lora.load_lora(lora_sd, key_map, log_missing=False)
 
             for key, adapter in patch_dict.items():
-                adapter_copy = copy.deepcopy(adapter)
+                try:
+                    train_adapter = adapter.to_train()
+                except Exception as exc:
+                    log.warning(f"Failed to convert LoRA adapter for key {key}: {exc}")
+                    continue
+
+                if not isinstance(train_adapter.lora_up, torch.nn.Linear) or not isinstance(train_adapter.lora_down, torch.nn.Linear):
+                    raise NotImplementedError("Shot-specific LoRA currently supports linear layers only.")
+
+                up_weight = train_adapter.lora_up.weight.detach().to(torch.float32).cpu()
+                down_weight = train_adapter.lora_down.weight.detach().to(torch.float32).cpu()
+                alpha_param = getattr(train_adapter, "alpha", None)
+                alpha_value = float(alpha_param.item()) if alpha_param is not None else 1.0
+
                 shot_patch.setdefault(key, []).append({
                     "strength": strength_value,
-                    "adapter": adapter_copy,
+                    "up": up_weight,
+                    "down": down_weight,
+                    "alpha": alpha_value,
+                    "cache": {},
                 })
+
+                del train_adapter
 
             del lora_sd
 
