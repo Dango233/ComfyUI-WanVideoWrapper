@@ -106,9 +106,13 @@ class CustomLinear(nn.Linear):
             for component in components:
                 if not isinstance(component, dict):
                     continue
-                cache = component.get("cache")
-                if isinstance(cache, dict):
-                    cache.clear()
+                if "cache" in component:
+                    cache_entry = component["cache"]
+                    if isinstance(cache_entry, tuple):
+                        _, cached_delta = cache_entry
+                        if isinstance(cached_delta, torch.Tensor):
+                            del cached_delta
+                    component["cache"] = None
 
     def forward(self, input):
         if self.bias is not None:
@@ -252,45 +256,38 @@ class CustomLinear(nn.Linear):
         return flat_output.view_as(output)
 
     def _get_shot_delta_weight(self, component, base_weight, strength_value, current_step, device, dtype):
-        cache = component.setdefault("cache", {})
-        cache_key = (device, dtype, strength_value, current_step)
-        delta = cache.get(cache_key)
+        patch_value = component.get("patch")
+        strength_model = component.get("strength_model", 1.0)
+        offset = component.get("offset")
+        function = component.get("function")
+        key = component.get("key")
 
-        if delta is None:
-            patch_value = component.get("patch")
-            strength_model = component.get("strength_model", 1.0)
-            offset = component.get("offset")
-            function = component.get("function")
-            key = component.get("key")
+        if patch_value is None or key is None:
+            return None
 
-            if patch_value is None or key is None:
-                return None
+        base_clone = base_weight.detach().clone()
+        patches = [(strength_value, patch_value, strength_model, offset, function)]
+        try:
+            updated = comfy_lora.calculate_weight(
+                patches,
+                base_clone,
+                key,
+                intermediate_dtype=torch.float32,
+                original_weights=None,
+            )
+        except Exception as exc:
+            logger.warning(
+                "Shot LoRA calculate_weight failed: module=%s key=%s err=%s",
+                getattr(self, "shot_lora_key", None) or hex(id(self)),
+                key,
+                exc,
+            )
+            component.setdefault("_failed_steps", set()).add(current_step)
+            return None
 
-            base_clone = base_weight.detach().clone()
-            patches = [(strength_value, patch_value, strength_model, offset, function)]
-            try:
-                updated = comfy_lora.calculate_weight(
-                    patches,
-                    base_clone,
-                    key,
-                    intermediate_dtype=torch.float32,
-                    original_weights=None,
-                )
-            except Exception as exc:
-                logger.warning(
-                    "Shot LoRA calculate_weight failed: module=%s key=%s err=%s",
-                    getattr(self, "shot_lora_key", None) or hex(id(self)),
-                    key,
-                    exc,
-                )
-                component.setdefault("_failed_steps", set()).add(current_step)
-                return None
-
-            delta = (updated - base_weight).to(device=device, dtype=dtype)
-            if not delta.is_contiguous():
-                delta = delta.contiguous()
-            cache[cache_key] = delta
-
+        delta = (updated - base_weight).to(device=device, dtype=dtype)
+        if not delta.is_contiguous():
+            delta = delta.contiguous()
         return delta
 
 def remove_lora_from_module(module):
