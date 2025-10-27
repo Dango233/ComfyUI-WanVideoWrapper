@@ -27,22 +27,19 @@ def _replace_linear(model, compute_dtype, state_dict, prefix="", patches=None, s
                     compute_dtype=compute_dtype,
                     scale_weight=scale_weights.get(scale_key) if scale_weights else None
                 )
+            #set_lora_params(model._modules[name], patches, module_prefix)
             model._modules[name].source_cls = type(module)
+            # Force requires_grad to False to avoid unexpected errors
             model._modules[name].requires_grad_(False)
 
     return model
 
-def set_lora_params(module, patches, module_prefix="", device=torch.device("cpu")):
+def set_lora_params(module, patches, module_prefix=""):
     remove_lora_from_module(module)
     # Recursively set lora_diffs and lora_strengths for all CustomLinear layers
     for name, child in module.named_children():
-        params = list(child.parameters())
-        if params:
-            device = params[0].device
-        else:
-            device = torch.device("cpu")
         child_prefix = (f"{module_prefix}{name}.")
-        set_lora_params(child, patches, child_prefix, device)
+        set_lora_params(child, patches, child_prefix)
     if isinstance(module, CustomLinear):
         key = f"diffusion_model.{module_prefix}weight"
         patch = patches.get(key, [])
@@ -64,12 +61,13 @@ def set_lora_params(module, patches, module_prefix="", device=torch.device("cpu"
                 else:
                     continue
             lora_strengths = [p[0] for p in patch]
-            module.set_lora_diffs(lora_diffs, device=device)
-            module.lora_strengths = lora_strengths
+            module.lora = (lora_diffs, lora_strengths)
             module.step = 0  # Initialize step for LoRA scheduling
 
 
 class CustomLinear(nn.Linear):
+    runtime_context = None
+
     def __init__(
         self,
         in_features,
@@ -81,22 +79,16 @@ class CustomLinear(nn.Linear):
     ) -> None:
         super().__init__(in_features, out_features, bias, device)
         self.compute_dtype = compute_dtype
-        self.lora_diffs = []
+        self.lora = None
         self.step = 0
         self.scale_weight = scale_weight
-        self.lora_strengths = []
-    
-    def set_lora_diffs(self, lora_diffs, device=torch.device("cpu")):
-        self.lora_diffs = []
-        for i, diff in enumerate(lora_diffs):
-            if len(diff) > 1:
-                self.register_buffer(f"lora_diff_{i}_0", diff[0].to(device))
-                self.register_buffer(f"lora_diff_{i}_1", diff[1].to(device))
-                setattr(self, f"lora_diff_{i}_2", diff[2])
-                self.lora_diffs.append((f"lora_diff_{i}_0", f"lora_diff_{i}_1", f"lora_diff_{i}_2"))
-            else:
-                self.register_buffer(f"lora_diff_{i}_0", diff[0].to(device))
-                self.lora_diffs.append(f"lora_diff_{i}_0")
+        self.bias_function = []
+        self.weight_function = []
+        self.shot_lora = []
+        self.shot_lora_key = None
+
+    def clear_shot_lora_cache(self):
+        return
 
     def forward(self, input):
         if self.bias is not None:
@@ -111,42 +103,155 @@ class CustomLinear(nn.Linear):
             else:
                 input = input * self.scale_weight
 
-        if hasattr(self, f"lora_diff_0_0"):
+        if self.lora is not None:
             weight = self.apply_lora(weight).to(self.compute_dtype)
 
-        return torch.nn.functional.linear(input, weight, bias)
+        output = torch.nn.functional.linear(input, weight, bias)
 
+        if self.shot_lora and CustomLinear.runtime_context is not None:
+            output = self._apply_shot_lora(output, input, weight)
+
+        return output
+
+    @torch.compiler.disable()
     def apply_lora(self, weight):
-        for lora_diff_names, lora_strength in zip(self.lora_diffs, self.lora_strengths):
+        for lora_diff, lora_strength in zip(self.lora[0], self.lora[1]):
             if isinstance(lora_strength, list):
                 lora_strength = lora_strength[self.step]
                 if lora_strength == 0.0:
                     continue
             elif lora_strength == 0.0:
                 continue
-            if isinstance(lora_diff_names, tuple):
-                lora_diff_0 = getattr(self, lora_diff_names[0])
-                lora_diff_1 = getattr(self, lora_diff_names[1])
-                lora_diff_2 = getattr(self, lora_diff_names[2])
-                patch_diff = torch.mm(
-                    lora_diff_0.flatten(start_dim=1),
-                    lora_diff_1.flatten(start_dim=1)
-                ).reshape(weight.shape) + 0
-                alpha = lora_diff_2 / lora_diff_1.shape[0] if lora_diff_2 is not None else 1.0
-                scale = lora_strength * alpha
-                weight = weight.add(patch_diff, alpha=scale)
-            else:
-                lora_diff = getattr(self, lora_diff_names)
-                weight = weight.add(lora_diff, alpha=lora_strength)
+            patch_diff = torch.mm(
+                lora_diff[0].flatten(start_dim=1).to(weight.device),
+                lora_diff[1].flatten(start_dim=1).to(weight.device)
+            ).reshape(weight.shape)
+            alpha = lora_diff[2] / lora_diff[1].shape[0] if lora_diff[2] is not None else 1.0
+            scale = lora_strength * alpha
+            weight = weight.add(patch_diff, alpha=scale)
         return weight
-    
+
+    def _apply_shot_lora(self, output, input, weight):
+        ctx = CustomLinear.runtime_context
+        if ctx is None:
+            return output
+
+        token_labels = ctx.get("token_labels")
+        if token_labels is None or token_labels.numel() == 0:
+            return output
+
+        if not self.shot_lora or all(len(components) == 0 or components is None for components in self.shot_lora):
+            return output
+
+        flat_input = input.reshape(-1, input.shape[-1])
+        flat_output = output.reshape(-1, output.shape[-1])
+
+        if token_labels.numel() != flat_input.shape[0]:
+            return output
+
+        device = flat_input.device
+        dtype = flat_input.dtype
+        current_step = ctx.get("current_step", 0)
+        for shot_idx, components in enumerate(self.shot_lora):
+            if not components:
+                continue
+            mask = (token_labels == shot_idx)
+            if not torch.any(mask):
+                continue
+            indices = torch.nonzero(mask, as_tuple=False).flatten()
+            if indices.numel() == 0:
+                continue
+            shot_input = flat_input.index_select(0, indices)
+            shot_delta = None
+            for component in components:
+                if not isinstance(component, dict):
+                    continue
+
+                strength_entry = component.get("strength", 1.0)
+                if isinstance(strength_entry, list):
+                    if current_step >= len(strength_entry):
+                        continue
+                    strength_value = float(strength_entry[current_step])
+                else:
+                    strength_value = float(strength_entry)
+                if strength_value == 0.0:
+                    continue
+
+                up_weight = component.get("up")
+                down_weight = component.get("down")
+                if up_weight is None or down_weight is None:
+                    continue
+
+                up_weight = up_weight.to(device=device, dtype=dtype, non_blocking=True)
+                down_weight = down_weight.to(device=device, dtype=dtype, non_blocking=True)
+
+                if up_weight.ndim != 2 or down_weight.ndim != 2:
+                    continue
+
+                in_dim = shot_input.shape[1]
+                out_dim = flat_output.shape[1]
+
+                if down_weight.shape[1] == in_dim:
+                    down_for_mul = down_weight
+                elif down_weight.shape[0] == in_dim:
+                    down_for_mul = down_weight.transpose(0, 1)
+                else:
+                    rank_hint = component.get("rank")
+                    if rank_hint is not None and down_weight.shape[0] == rank_hint:
+                        down_for_mul = down_weight
+                    elif rank_hint is not None and down_weight.shape[1] == rank_hint:
+                        down_for_mul = down_weight.transpose(0, 1)
+                    else:
+                        continue
+
+                rank = down_for_mul.shape[0]
+
+                if up_weight.shape[0] == out_dim and up_weight.shape[1] == rank:
+                    up_for_mul = up_weight
+                elif up_weight.shape[1] == out_dim and up_weight.shape[0] == rank:
+                    up_for_mul = up_weight.transpose(0, 1)
+                else:
+                    continue
+
+                alpha_entry = component.get("alpha")
+                if alpha_entry is None:
+                    scale = strength_value
+                else:
+                    scale = strength_value * (float(alpha_entry) / max(rank, 1))
+
+                low_rank = torch.matmul(shot_input, down_for_mul.transpose(0, 1))
+                contribution = torch.matmul(low_rank, up_for_mul.transpose(0, 1))
+                contribution = contribution * scale
+                shot_delta = contribution if shot_delta is None else (shot_delta + contribution)
+
+            if shot_delta is not None:
+                flat_output.index_add_(0, indices, shot_delta)
+
+        return flat_output.view_as(output)
+
 def remove_lora_from_module(module):
     for name, submodule in module.named_modules():
-        if hasattr(submodule, "lora_diffs"):
-            for i in range(len(submodule.lora_diffs)):
-                if hasattr(submodule, f"lora_diff_{i}_0"):
-                    delattr(submodule, f"lora_diff_{i}_0")
-                if hasattr(submodule, f"lora_diff_{i}_1"):
-                    delattr(submodule, f"lora_diff_{i}_1")
-                if hasattr(submodule, f"lora_diff_{i}_2"):
-                    delattr(submodule, f"lora_diff_{i}_2")
+        if isinstance(submodule, CustomLinear):
+            submodule.clear_shot_lora_cache()
+        submodule.lora = None
+
+
+def set_shot_lora_params(module, shot_payload, module_prefix=""):
+    for name, child in module.named_children():
+        child_prefix = f"{module_prefix}{name}."
+        set_shot_lora_params(child, shot_payload, child_prefix)
+
+    if isinstance(module, CustomLinear):
+        module.clear_shot_lora_cache()
+        key = f"diffusion_model.{module_prefix}weight"
+        shot_components = shot_payload.get(key)
+        if shot_components is None and "_orig_mod." in key:
+            alt_key = key.replace("_orig_mod.", "")
+            shot_components = shot_payload.get(alt_key)
+
+        if shot_components is None:
+            module.shot_lora = []
+            module.shot_lora_key = key
+        else:
+            module.shot_lora = [components if components is not None else [] for components in shot_components]
+            module.shot_lora_key = key
