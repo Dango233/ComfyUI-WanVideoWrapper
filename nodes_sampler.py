@@ -89,24 +89,59 @@ def prepare_shot_lora_payload(base_model, shot_lora_specs):
             patch_dict = comfy_lora.load_lora(lora_sd, key_map, log_missing=False)
 
             for raw_key, patch_value in patch_dict.items():
-                offset = None
-                function = None
                 if isinstance(raw_key, str):
                     mapped_key = raw_key
                 else:
                     mapped_key = raw_key[0]
-                    offset = raw_key[1]
-                    if len(raw_key) > 2:
-                        function = raw_key[2]
+
+                weights_tuple = getattr(patch_value, "weights", None)
+                if (
+                    not isinstance(weights_tuple, tuple)
+                    or len(weights_tuple) < 2
+                    or not isinstance(weights_tuple[0], torch.Tensor)
+                    or not isinstance(weights_tuple[1], torch.Tensor)
+                ):
+                    log.warning(
+                        f"Shot LoRA entry {mapped_key} is not a standard linear LoRA and will be skipped in per-shot mode."
+                    )
+                    continue
+
+                up_tensor = weights_tuple[0]
+                down_tensor = weights_tuple[1]
+                alpha_entry = weights_tuple[2] if len(weights_tuple) > 2 else None
+                mid_entry = weights_tuple[3] if len(weights_tuple) > 3 else None
+                dora_entry = weights_tuple[4] if len(weights_tuple) > 4 else None
+                reshape_entry = weights_tuple[5] if len(weights_tuple) > 5 else None
+
+                if mid_entry is not None or dora_entry is not None or (reshape_entry not in (None, [])):
+                    log.warning(
+                        f"Shot LoRA entry {mapped_key} requires non-linear adapter features and will be skipped in per-shot mode."
+                    )
+                    continue
+
+                if up_tensor.ndim != 2 or down_tensor.ndim != 2:
+                    log.warning(
+                        f"Shot LoRA entry {mapped_key} has unexpected tensor rank (up {up_tensor.ndim}, down {down_tensor.ndim}); skipping."
+                    )
+                    continue
+
+                up_cpu = up_tensor.to(torch.float32).cpu().contiguous()
+                down_cpu = down_tensor.to(torch.float32).cpu().contiguous()
+
+                alpha_value = 1.0
+                if isinstance(alpha_entry, torch.Tensor):
+                    alpha_value = float(alpha_entry.item())
+                elif isinstance(alpha_entry, (int, float)):
+                    alpha_value = float(alpha_entry)
+
+                rank_hint = min(up_cpu.shape[0], up_cpu.shape[1], down_cpu.shape[0], down_cpu.shape[1])
 
                 component = {
                     "strength": strength_value,
-                    "strength_model": 1.0,
-                    "patch": patch_value,
-                    "offset": offset,
-                    "function": function,
-                    "key": mapped_key,
-                    "cache": None,
+                    "alpha": alpha_value,
+                    "up": up_cpu,
+                    "down": down_cpu,
+                    "rank": rank_hint,
                 }
 
                 shot_patch.setdefault(mapped_key, []).append(component)
