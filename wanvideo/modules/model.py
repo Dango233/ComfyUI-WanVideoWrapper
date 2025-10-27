@@ -19,6 +19,7 @@ from tqdm import tqdm
 import gc
 
 from ...utils import log, get_module_memory_mb
+from ...custom_linear import CustomLinear
 from ...cache_methods.cache_methods import TeaCacheState, MagCacheState, EasyCacheState, relative_l1_distance
 from ...multitalk.multitalk import get_attn_map_with_target
 from ...echoshot.echoshot import rope_apply_z, rope_apply_c, rope_apply_echoshot
@@ -2298,7 +2299,9 @@ class WanModel(torch.nn.Module):
         # Stand-In only used on first positive pass, then cached in kv_cache
         if is_uncond or current_step > 0: 
             standin_input = None
-        
+
+        CustomLinear.runtime_context = None
+
         # MTV Crafter motion projection
         if mtv_motion_tokens is not None:
             bs, motion_seq_len =  mtv_motion_tokens.shape[0], mtv_motion_tokens.shape[1]
@@ -2512,6 +2515,13 @@ class WanModel(torch.nn.Module):
 
             spatial_tokens = int(grid_sizes[0][1].item() * grid_sizes[0][2].item())
             shot_token_labels = shot_indices_tensor.repeat_interleave(spatial_tokens, dim=1)
+
+            if getattr(self, "shot_lora_count", 0) > 0:
+                CustomLinear.runtime_context = {
+                    "token_labels": shot_token_labels.reshape(-1).to(device),
+                    "current_step": current_step,
+                }
+
             shot_latent_cuts = labels_to_cuts(shot_token_labels)
 
             prefix_tokens = 0
@@ -2538,6 +2548,8 @@ class WanModel(torch.nn.Module):
                     shot_block_config["token_ratio"] = token_ratio
                 else:
                     shot_block_config["token_absolute"] = token_absolute
+        else:
+            CustomLinear.runtime_context = None
 
         x = [u.flatten(2).transpose(1, 2) for u in x]
         self.original_seq_len = x[0].shape[1]
@@ -3190,6 +3202,7 @@ class WanModel(torch.nn.Module):
        
         x = self.unpatchify(x, original_grid_sizes) # type: ignore[arg-type]
         x = [u.float() for u in x]
+        CustomLinear.runtime_context = None
         return (x, x_ovi, pred_id) if pred_id is not None else (x, x_ovi, None)
 
     def unpatchify(self, x, grid_sizes):
