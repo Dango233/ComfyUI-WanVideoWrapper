@@ -176,13 +176,23 @@ class CustomLinear(nn.Linear):
                 up_weight = component["up"].to(device=device, dtype=dtype)
                 down_weight = component["down"].to(device=device, dtype=dtype)
 
-                rank = down_weight.shape[0] if down_weight.dim() >= 2 else 1
+                if up_weight.ndim != 2 or down_weight.ndim != 2:
+                    continue
+
+                rank = up_weight.shape[1]
+                if down_weight.shape[0] != rank:
+                    if down_weight.shape[1] == rank:
+                        down_weight = down_weight.transpose(0, 1)
+                    else:
+                        continue
+
                 alpha = component.get("alpha", 1.0)
                 scale = strength_value * (alpha / max(rank, 1))
 
-                low_rank = torch.nn.functional.linear(shot_input, down_weight, None)
-                contribution = torch.nn.functional.linear(low_rank, up_weight, None)
-                del low_rank
+                down_t = down_weight.transpose(0, 1)
+                low_rank = torch.matmul(shot_input, down_t)
+                contribution = torch.matmul(low_rank, up_weight.transpose(0, 1))
+                del low_rank, down_t
                 del up_weight, down_weight
 
                 contribution = contribution * scale
