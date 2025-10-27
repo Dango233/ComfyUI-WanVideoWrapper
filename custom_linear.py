@@ -66,6 +66,8 @@ def set_lora_params(module, patches, module_prefix=""):
 
 
 class CustomLinear(nn.Linear):
+    runtime_context = None
+
     def __init__(
         self,
         in_features,
@@ -82,6 +84,7 @@ class CustomLinear(nn.Linear):
         self.scale_weight = scale_weight
         self.bias_function = []
         self.weight_function = []
+        self.shot_lora = []
 
     def forward(self, input):
         if self.bias is not None:
@@ -99,7 +102,12 @@ class CustomLinear(nn.Linear):
         if self.lora is not None:
             weight = self.apply_lora(weight).to(self.compute_dtype)
 
-        return torch.nn.functional.linear(input, weight, bias)
+        output = torch.nn.functional.linear(input, weight, bias)
+
+        if self.shot_lora and CustomLinear.runtime_context is not None:
+            output = self._apply_shot_lora(output, input, weight)
+
+        return output
 
     @torch.compiler.disable()
     def apply_lora(self, weight):
@@ -118,7 +126,102 @@ class CustomLinear(nn.Linear):
             scale = lora_strength * alpha
             weight = weight.add(patch_diff, alpha=scale)
         return weight
+
+    def _apply_shot_lora(self, output, input, weight):
+        ctx = CustomLinear.runtime_context
+        if ctx is None:
+            return output
+
+        token_labels = ctx.get("token_labels")
+        if token_labels is None or token_labels.numel() == 0:
+            return output
+
+        if not self.shot_lora or all(len(components) == 0 or components is None for components in self.shot_lora):
+            return output
+
+        flat_input = input.reshape(-1, input.shape[-1])
+        flat_output = output.reshape(-1, output.shape[-1])
+
+        if token_labels.numel() != flat_input.shape[0]:
+            return output
+
+        device = flat_input.device
+        dtype = flat_input.dtype
+        diff_cache = ctx.setdefault("diff_cache", {})
+        current_step = ctx.get("current_step", 0)
+
+        for shot_idx, components in enumerate(self.shot_lora):
+            if not components:
+                continue
+            mask = (token_labels == shot_idx)
+            if not torch.any(mask):
+                continue
+            indices = torch.nonzero(mask, as_tuple=False).flatten()
+            if indices.numel() == 0:
+                continue
+            shot_input = flat_input.index_select(0, indices)
+            shot_delta = None
+            for component in components:
+                if component is None:
+                    continue
+                strength = component.get("strength", 1.0)
+                if isinstance(strength, list):
+                    if current_step >= len(strength):
+                        continue
+                    strength_value = float(strength[current_step])
+                else:
+                    strength_value = float(strength)
+                if strength_value == 0.0:
+                    continue
+
+                adapter = component.get("adapter")
+                if adapter is None:
+                    continue
+
+                cache_key = (id(self), id(adapter))
+                diff_weight = diff_cache.get(cache_key)
+                if diff_weight is None or diff_weight.device != device or diff_weight.dtype != dtype:
+                    base_weight = weight.detach()
+                    diff_weight = adapter.calculate_weight(
+                        base_weight,
+                        "shot_lora",
+                        1.0,
+                        1.0,
+                        None,
+                        None,
+                        intermediate_dtype=base_weight.dtype,
+                        original_weight=base_weight,
+                    ) - base_weight
+                    diff_weight = diff_weight.to(device=device, dtype=dtype)
+                    diff_cache[cache_key] = diff_weight
+
+                contribution = torch.nn.functional.linear(shot_input, diff_weight, None)
+                contribution = contribution * strength_value
+                shot_delta = contribution if shot_delta is None else (shot_delta + contribution)
+
+            if shot_delta is not None:
+                flat_output.index_add_(0, indices, shot_delta)
+
+        return flat_output.view_as(output)
     
 def remove_lora_from_module(module):
     for name, submodule in module.named_modules():
         submodule.lora = None
+
+
+def set_shot_lora_params(module, shot_payload, module_prefix=""):
+    for name, child in module.named_children():
+        child_prefix = f"{module_prefix}{name}."
+        set_shot_lora_params(child, shot_payload, child_prefix)
+
+    if isinstance(module, CustomLinear):
+        key = f"diffusion_model.{module_prefix}weight"
+        shot_components = shot_payload.get(key)
+        if shot_components is None and "_orig_mod." in key:
+            alt_key = key.replace("_orig_mod.", "")
+            shot_components = shot_payload.get(alt_key)
+
+        if shot_components is None:
+            module.shot_lora = []
+        else:
+            module.shot_lora = [components if components is not None else [] for components in shot_components]

@@ -7,7 +7,7 @@ from PIL import Image
 from diffusers.schedulers import FlowMatchEulerDiscreteScheduler
 
 from .wanvideo.modules.model import rope_params
-from .custom_linear import remove_lora_from_module, set_lora_params, _replace_linear
+from .custom_linear import remove_lora_from_module, set_lora_params, set_shot_lora_params, _replace_linear
 from .wanvideo.schedulers import get_scheduler, get_sampling_sigmas, retrieve_timesteps, scheduler_list
 from .wanvideo.modules.shot_utils import build_shot_indices
 from .gguf.gguf import set_lora_params_gguf
@@ -15,7 +15,7 @@ from .multitalk.multitalk import timestep_transform, add_noise
 from .utils import(log, print_memory, apply_lora, clip_encode_image_tiled, fourier_filter, optimized_scale, setup_radial_attention,
                    compile_model, dict_to_device, tangential_projection, set_module_tensor_to_device, get_raag_guidance, temporal_score_rescaling)
 from .cache_methods.cache_methods import cache_report
-from .nodes_model_loading import load_weights
+from .nodes_model_loading import load_weights, standardize_lora_key_format, filter_state_dict_by_blocks, model_lora_keys_unet
 from .enhance_a_video.globals import set_enhance_weight, set_num_frames
 from contextlib import nullcontext
 from einops import rearrange
@@ -24,6 +24,7 @@ from comfy import model_management as mm
 from comfy.utils import ProgressBar, load_torch_file
 from comfy.clip_vision import clip_preprocess, ClipVisionModel
 from comfy.cli_args import args, LatentPreviewMethod
+import comfy.lora as comfy_lora
 
 script_directory = os.path.dirname(os.path.abspath(__file__))
 
@@ -46,6 +47,78 @@ class MetaParameter(torch.nn.Parameter):
         self = torch.nn.Parameter(data, requires_grad=False)
         self.quant_type = quant_type
         return self
+
+def prepare_shot_lora_payload(transformer, shot_lora_specs):
+    """Load and organize per-shot LoRA adapters for Holocine workflows."""
+    if not shot_lora_specs:
+        return []
+
+    key_map = model_lora_keys_unet(transformer, {})
+    payload = []
+
+    for shot_idx, lora_entries in enumerate(shot_lora_specs):
+        if not lora_entries:
+            payload.append({})
+            continue
+
+        shot_patch = {}
+        for entry in lora_entries:
+            if not isinstance(entry, dict):
+                continue
+
+            lora_path = entry.get("path")
+            if not lora_path:
+                raise ValueError(f"Shot LoRA entry is missing 'path' (shot index {shot_idx}).")
+            if not os.path.exists(lora_path):
+                raise ValueError(f"Shot LoRA file not found: {lora_path}")
+
+            strength_raw = entry.get("strength", 1.0)
+            if isinstance(strength_raw, list):
+                strength_value = [float(s) for s in strength_raw]
+            else:
+                strength_value = float(strength_raw)
+
+            lora_sd = load_torch_file(lora_path, safe_load=True)
+            lora_sd = standardize_lora_key_format(lora_sd)
+
+            selected_blocks = entry.get("blocks", {})
+            layer_filter = entry.get("layer_filter", [])
+            if selected_blocks:
+                lora_sd = filter_state_dict_by_blocks(lora_sd, selected_blocks, layer_filter)
+
+            patch_dict = comfy_lora.load_lora(lora_sd, key_map, log_missing=False)
+
+            for key, adapter in patch_dict.items():
+                adapter_copy = copy.deepcopy(adapter)
+                shot_patch.setdefault(key, []).append({
+                    "strength": strength_value,
+                    "adapter": adapter_copy,
+                })
+
+            del lora_sd
+
+        payload.append(shot_patch)
+
+    return payload
+
+
+def assign_shot_lora_to_transformer(transformer, shot_lora_payload):
+    if not shot_lora_payload:
+        set_shot_lora_params(transformer, {})
+        transformer.shot_lora_count = 0
+        return 0
+
+    shot_count = len(shot_lora_payload)
+    per_module = {}
+    for shot_idx, shot_patch in enumerate(shot_lora_payload):
+        for key, components in shot_patch.items():
+            slots = per_module.setdefault(key, [None] * shot_count)
+            slots[shot_idx] = components
+
+    set_shot_lora_params(transformer, per_module)
+    transformer.shot_lora_count = shot_count
+    return shot_count
+
 
 def offload_transformer(transformer):    
     transformer.teacache_state.clear_all()
@@ -201,6 +274,14 @@ class WanVideoSampler:
             shot_attention_cfg.setdefault("backend", "auto")
             shot_attention_cfg.setdefault("global_token_ratio_or_number", 0.25)
             shot_mask_type = shot_attention_cfg.get("mask_type")
+
+        shot_lora_specs = holocine_args.get("shot_loras") if args_present else None
+        shot_lora_payload = []
+        if shot_lora_specs:
+            shot_lora_payload = prepare_shot_lora_payload(transformer, shot_lora_specs)
+            if all(len(entry) == 0 for entry in shot_lora_payload):
+                shot_lora_payload = []
+        assign_shot_lora_to_transformer(transformer, shot_lora_payload)
 
         block_swap_args = transformer_options.get("block_swap_args", None)
         if block_swap_args is not None:

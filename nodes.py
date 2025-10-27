@@ -211,6 +211,7 @@ class WanVideoHolocineShotBuilder:
             },
             "optional": {
                 "shot_list": ("WANVID_HOLOCINE_SHOT_LIST",),
+                "shot_lora": ("WANVIDLORA", {"default": None, "tooltip": "可选：为当前镜头附加的 LoRA 列表，会在采样时按镜头聚合。"}),
             }
         }
 
@@ -220,7 +221,7 @@ class WanVideoHolocineShotBuilder:
     CATEGORY = "WanVideoWrapper/Holocine"
     DESCRIPTION = "Build a Holocine-style structured shot list by chaining this node."
 
-    def process(self, shot_caption, shot_list=None):
+    def process(self, shot_caption, shot_list=None, shot_lora=None):
         caption = shot_caption.strip()
         if not caption:
             raise ValueError("Shot caption cannot be empty.")
@@ -231,6 +232,8 @@ class WanVideoHolocineShotBuilder:
             "index": shot_index,
             "caption": caption,
         }
+        if shot_lora is not None:
+            shot_info["lora"] = list(shot_lora)
         shots.append(shot_info)
         return (shots,)
 
@@ -302,6 +305,18 @@ class WanVideoHolocinePromptEncode:
             raise ValueError("At least one shot is required. Please chain WanVideoHolocineShotBuilder nodes first.")
 
         shots = sorted([dict(item) for item in shot_list], key=lambda s: s.get("index", 0))
+        shot_lora_config: list[list[dict]] = []
+        for shot in shots:
+            loras_raw = shot.get("lora")
+            if not loras_raw:
+                shot_lora_config.append([])
+                continue
+            normalized_loras = []
+            for entry in loras_raw:
+                if isinstance(entry, dict):
+                    normalized_loras.append(dict(entry))
+            shot_lora_config.append(normalized_loras)
+
         inferred_frames = None
         if isinstance(image_embeds, dict):
             inferred_frames = image_embeds.get("num_frames")
@@ -361,6 +376,7 @@ class WanVideoHolocinePromptEncode:
         holocine_args = {
             "total_frames": total_frames,
             "shot_cut_frames": shot_cuts,
+            "shot_loras": shot_lora_config,
         }
 
         return text_embeds, holocine_args, positive_prompt
