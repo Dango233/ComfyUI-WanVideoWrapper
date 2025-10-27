@@ -48,12 +48,12 @@ class MetaParameter(torch.nn.Parameter):
         self.quant_type = quant_type
         return self
 
-def prepare_shot_lora_payload(transformer, shot_lora_specs):
+def prepare_shot_lora_payload(base_model, shot_lora_specs):
     """Load and organize per-shot LoRA adapters for Holocine workflows."""
     if not shot_lora_specs:
         return []
 
-    key_map = model_lora_keys_unet(transformer, {})
+    key_map = model_lora_keys_unet(base_model, {})
     payload = []
 
     for shot_idx, lora_entries in enumerate(shot_lora_specs):
@@ -278,7 +278,7 @@ class WanVideoSampler:
         shot_lora_specs = holocine_args.get("shot_loras") if args_present else None
         shot_lora_payload = []
         if shot_lora_specs:
-            shot_lora_payload = prepare_shot_lora_payload(transformer, shot_lora_specs)
+            shot_lora_payload = prepare_shot_lora_payload(patcher.model, shot_lora_specs)
             if all(len(entry) == 0 for entry in shot_lora_payload):
                 shot_lora_payload = []
         assign_shot_lora_to_transformer(transformer, shot_lora_payload)
