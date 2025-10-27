@@ -1,3 +1,4 @@
+import logging
 import torch
 import torch.nn as nn
 from accelerate import init_empty_weights
@@ -65,6 +66,9 @@ def set_lora_params(module, patches, module_prefix=""):
             module.step = 0  # Initialize step for LoRA scheduling
 
 
+logger = logging.getLogger("wan_shot_lora")
+
+
 class CustomLinear(nn.Linear):
     runtime_context = None
 
@@ -85,6 +89,7 @@ class CustomLinear(nn.Linear):
         self.bias_function = []
         self.weight_function = []
         self.shot_lora = []
+        self.shot_lora_key = None
 
     def forward(self, input):
         if self.bias is not None:
@@ -148,6 +153,8 @@ class CustomLinear(nn.Linear):
         device = flat_input.device
         dtype = flat_input.dtype
         current_step = ctx.get("current_step", 0)
+        debug_enabled = bool(ctx.get("debug_shot_lora", False))
+        module_identifier = getattr(self, "shot_lora_key", None) or hex(id(self))
 
         for shot_idx, components in enumerate(self.shot_lora):
             if not components:
@@ -227,9 +234,21 @@ class CustomLinear(nn.Linear):
 
             if shot_delta is not None:
                 flat_output.index_add_(0, indices, shot_delta)
+                if debug_enabled:
+                    debug_seen = ctx.setdefault("debug_seen", set())
+                    debug_key = (module_identifier, shot_idx)
+                    if debug_key not in debug_seen:
+                        debug_seen.add(debug_key)
+                        delta_mean = float(shot_delta.abs().mean().item())
+                        logger.info(
+                            "Shot LoRA applied: module=%s shot=%d mean|delta|=%.6f",
+                            module_identifier,
+                            shot_idx,
+                            delta_mean,
+                        )
 
         return flat_output.view_as(output)
-    
+
 def remove_lora_from_module(module):
     for name, submodule in module.named_modules():
         submodule.lora = None
@@ -249,5 +268,7 @@ def set_shot_lora_params(module, shot_payload, module_prefix=""):
 
         if shot_components is None:
             module.shot_lora = []
+            module.shot_lora_key = key
         else:
             module.shot_lora = [components if components is not None else [] for components in shot_components]
+            module.shot_lora_key = key
