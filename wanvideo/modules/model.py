@@ -748,7 +748,7 @@ class WanT2VCrossAttention(WanSelfAttention):
         if text_context.shape[1] == 0:
             raise ValueError("Text context is empty after removing image tokens; cannot perform cross attention.")
 
-        if nag_context is not None and not is_uncond:
+      if nag_context is not None and not is_uncond:
             x = self.normalized_attention_guidance(b, n, d, q, text_context, nag_context, nag_params)
         else:
             if is_longcat:
@@ -852,11 +852,23 @@ class WanI2VCrossAttention(WanSelfAttention):
         if text_context.shape[1] == 0:
             raise ValueError("Text context is empty after removing image tokens; cannot perform cross attention.")
 
+        clip_len = clip_embed.shape[1] if clip_embed is not None else 0
+        if context is None:
+            raise ValueError("Cross attention requires text context, but none was provided.")
+
+        if clip_len > 0 and context.shape[1] >= clip_len:
+            text_context = context[:, clip_len:, :]
+        else:
+            text_context = context
+
+        if text_context.shape[1] == 0:
+            raise ValueError("Text context is empty after removing image tokens; cannot perform cross attention.")
+
         if nag_context is not None and not is_uncond:
             x_text = self.normalized_attention_guidance(b, n, d, q, text_context, nag_context, nag_params)
         else:
             # text attention
-            k = self.norm_k(self.k(text_context).to(self.norm_k.weight.dtype)).view(b, -1, n, d).to(x.dtype)
+          k = self.norm_k(self.k(text_context).to(self.norm_k.weight.dtype)).view(b, -1, n, d).to(x.dtype)
             v = self.v(text_context).view(b, -1, n, d)
             x_text = attention(q, k, v, attention_mode=self.attention_mode).flatten(2)
 
