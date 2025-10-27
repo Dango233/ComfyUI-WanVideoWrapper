@@ -406,8 +406,14 @@ class WanVideoSampler:
         if denoise_strength < 1.0:
             if start_step != 0:
                 raise ValueError("start_step must be 0 when denoise_strength is used")
-            start_step = steps - int(steps * denoise_strength) - 1
-            add_noise_to_samples = True #for now to not break old workflows
+            if isinstance(scheduler, str) and 'rcm_revision' in scheduler:
+                effective_steps = max(1, int(round(steps * denoise_strength)))
+                effective_steps = min(effective_steps, steps)
+                start_step = max(0, steps - effective_steps)
+            else:
+                start_step = steps - int(steps * denoise_strength) - 1
+            start_step = max(0, start_step)
+            add_noise_to_samples = True  # for now to keep backwards compatibility
 
         sample_scheduler = None
         if isinstance(scheduler, dict):
