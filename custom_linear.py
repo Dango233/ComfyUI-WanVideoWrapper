@@ -173,27 +173,54 @@ class CustomLinear(nn.Linear):
                 if strength_value == 0.0:
                     continue
 
-                up_weight = component["up"].to(device=device, dtype=dtype)
-                down_weight = component["down"].to(device=device, dtype=dtype)
+                component_cache = component.setdefault("cache", {})
+                cache_key = (device, dtype)
+                cached_pair = component_cache.get(cache_key)
+                if cached_pair is None:
+                    cached_pair = (
+                        component["up"].to(device=device, dtype=dtype, non_blocking=True),
+                        component["down"].to(device=device, dtype=dtype, non_blocking=True),
+                    )
+                    component_cache[cache_key] = cached_pair
+
+                up_weight, down_weight = cached_pair
 
                 if up_weight.ndim != 2 or down_weight.ndim != 2:
                     continue
 
-                rank = up_weight.shape[1]
-                if down_weight.shape[0] != rank:
-                    if down_weight.shape[1] == rank:
-                        down_weight = down_weight.transpose(0, 1)
+                in_dim = shot_input.shape[1]
+                out_dim = flat_output.shape[1]
+
+                # Ensure down_weight orientation -> (rank, in_dim)
+                if down_weight.shape[1] == in_dim:
+                    down_for_mul = down_weight
+                elif down_weight.shape[0] == in_dim:
+                    down_for_mul = down_weight.transpose(0, 1)
+                else:
+                    # fall back to stored rank if available
+                    rank_hint = component.get("rank")
+                    if rank_hint is not None and down_weight.shape[0] == rank_hint:
+                        down_for_mul = down_weight
+                    elif rank_hint is not None and down_weight.shape[1] == rank_hint:
+                        down_for_mul = down_weight.transpose(0, 1)
                     else:
                         continue
+
+                rank = down_for_mul.shape[0]
+
+                # Ensure up_weight orientation -> (out_dim, rank)
+                if up_weight.shape[0] == out_dim and up_weight.shape[1] == rank:
+                    up_for_mul = up_weight
+                elif up_weight.shape[1] == out_dim and up_weight.shape[0] == rank:
+                    up_for_mul = up_weight.transpose(0, 1)
+                else:
+                    continue
 
                 alpha = component.get("alpha", 1.0)
                 scale = strength_value * (alpha / max(rank, 1))
 
-                down_t = down_weight.transpose(0, 1)
-                low_rank = torch.matmul(shot_input, down_t)
-                contribution = torch.matmul(low_rank, up_weight.transpose(0, 1))
-                del low_rank, down_t
-                del up_weight, down_weight
+                low_rank = torch.matmul(shot_input, down_for_mul.transpose(0, 1))
+                contribution = torch.matmul(low_rank, up_for_mul.transpose(0, 1))
 
                 contribution = contribution * scale
                 shot_delta = contribution if shot_delta is None else (shot_delta + contribution)

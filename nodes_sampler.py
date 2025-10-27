@@ -89,75 +89,61 @@ def prepare_shot_lora_payload(base_model, shot_lora_specs):
             patch_dict = comfy_lora.load_lora(lora_sd, key_map, log_missing=False)
 
             for key, adapter in patch_dict.items():
-                up_tensor = None
-                down_tensor = None
-                alpha_value = 1.0
-
-                train_adapter = None
-                if hasattr(adapter, "to_train"):
-                    try:
-                        train_adapter = adapter.to_train()
-                    except Exception as exc:
-                        log.warning(f"Failed to convert LoRA adapter for key {key}: {exc}")
-                        train_adapter = None
-
-                if train_adapter is not None:
-                    up_linear = getattr(train_adapter, "lora_up", None)
-                    down_linear = getattr(train_adapter, "lora_down", None)
-                    if isinstance(up_linear, torch.nn.Linear) and isinstance(down_linear, torch.nn.Linear):
-                        up_tensor = up_linear.weight
-                        down_tensor = down_linear.weight
-                        alpha_attr = getattr(train_adapter, "alpha", None)
-                        if isinstance(alpha_attr, torch.Tensor):
-                            alpha_value = float(alpha_attr.item())
-                        elif isinstance(alpha_attr, (int, float)):
-                            alpha_value = float(alpha_attr)
-                    else:
-                        up_tensor = None
-                        down_tensor = None
-
-                if up_tensor is None or down_tensor is None:
-                    weights_entry = getattr(adapter, "weights", None)
-                    if (isinstance(weights_entry, tuple)
-                            and len(weights_entry) >= 2
-                            and isinstance(weights_entry[0], torch.Tensor)
-                            and isinstance(weights_entry[1], torch.Tensor)
-                            and weights_entry[0] is not None
-                            and weights_entry[1] is not None):
-                        up_tensor = weights_entry[0]
-                        down_tensor = weights_entry[1]
-                        alpha_entry = weights_entry[2] if len(weights_entry) > 2 else None
-                        if isinstance(alpha_entry, torch.Tensor):
-                            alpha_value = float(alpha_entry.item())
-                        elif isinstance(alpha_entry, (int, float)):
-                            alpha_value = float(alpha_entry)
-                    else:
-                        log.warning(f"Skipping LoRA adapter for key {key}: unsupported format for shot LoRA.")
-                        continue
-
-                if up_tensor is None or down_tensor is None:
-                    log.warning(f"Skipping LoRA adapter for key {key}: missing low-rank weights.")
+                if not hasattr(adapter, "to_train"):
+                    log.warning(f"Skipping LoRA adapter for key {key}: training conversion not supported for per-shot application.")
                     continue
+
+                try:
+                    train_adapter = adapter.to_train()
+                except Exception as exc:
+                    log.warning(f"Failed to convert LoRA adapter for key {key}: {exc}")
+                    continue
+
+                lora_up = getattr(train_adapter, "lora_up", None)
+                lora_down = getattr(train_adapter, "lora_down", None)
+                lora_mid = getattr(train_adapter, "lora_mid", None)
+
+                if not isinstance(lora_up, torch.nn.Linear) or not isinstance(lora_down, torch.nn.Linear):
+                    log.warning(f"Skipping LoRA adapter for key {key}: only linear LoRA layers are supported per shot.")
+                    continue
+
+                if lora_mid is not None:
+                    log.warning(f"Skipping LoRA adapter for key {key}: LoRA with intermediate convolution is not supported per shot.")
+                    continue
+
+                up_tensor = lora_up.weight.detach().to(torch.float32).cpu().contiguous()
+                down_tensor = lora_down.weight.detach().to(torch.float32).cpu().contiguous()
 
                 if up_tensor.ndim != 2 or down_tensor.ndim != 2:
-                    log.warning(f"Skipping LoRA adapter for key {key}: only linear LoRA weights are supported.")
+                    log.warning(f"Skipping LoRA adapter for key {key}: unexpected tensor rank {up_tensor.ndim}/{down_tensor.ndim}.")
                     continue
 
-                if up_tensor.shape[0] != down_tensor.shape[0]:
-                    if up_tensor.ndim == 2 and down_tensor.ndim == 2 and up_tensor.shape[0] == down_tensor.shape[1]:
-                        down_tensor = down_tensor.transpose(0, 1)
-                    else:
-                        log.warning(f"Skipping LoRA adapter for key {key}: incompatible low-rank dimensions {up_tensor.shape} vs {down_tensor.shape}.")
-                        continue
+                alpha_attr = getattr(train_adapter, "alpha", None)
+                if isinstance(alpha_attr, torch.Tensor):
+                    alpha_value = float(alpha_attr.item())
+                elif isinstance(alpha_attr, (int, float)):
+                    alpha_value = float(alpha_attr)
+                else:
+                    alpha_value = 1.0
 
-                shot_patch.setdefault(key, []).append({
+                component = {
                     "strength": strength_value,
-                    "up": up_tensor.detach().to(torch.float32).cpu(),
-                    "down": down_tensor.detach().to(torch.float32).cpu(),
                     "alpha": alpha_value,
-                })
+                    "up": up_tensor,
+                    "down": down_tensor,
+                }
 
-                del train_adapter
+                rank = None
+                if down_tensor.shape[0] == up_tensor.shape[1]:
+                    rank = down_tensor.shape[0]
+                elif down_tensor.shape[1] == up_tensor.shape[1]:
+                    rank = down_tensor.shape[1]
+                component["rank"] = rank
+
+                cache = component.setdefault("cache", {})
+                cache.clear()
+
+                shot_patch.setdefault(key, []).append(component)
 
             del lora_sd
 
