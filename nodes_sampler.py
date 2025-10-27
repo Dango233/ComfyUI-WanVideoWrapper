@@ -7,7 +7,13 @@ from PIL import Image
 from diffusers.schedulers import FlowMatchEulerDiscreteScheduler
 
 from .wanvideo.modules.model import rope_params
-from .custom_linear import remove_lora_from_module, set_lora_params, set_shot_lora_params, _replace_linear
+from .custom_linear import (
+    CustomLinear,
+    remove_lora_from_module,
+    set_lora_params,
+    set_shot_lora_params,
+    _replace_linear,
+)
 from .wanvideo.schedulers import get_scheduler, get_sampling_sigmas, retrieve_timesteps, scheduler_list
 from .wanvideo.modules.shot_utils import build_shot_indices
 from .gguf.gguf import set_lora_params_gguf
@@ -174,6 +180,11 @@ def assign_shot_lora_to_transformer(transformer, shot_lora_payload):
 
 
 def offload_transformer(transformer):    
+    # Clear any per-shot LoRA references so offloading can release memory promptly
+    if "assign_shot_lora_to_transformer" in globals():
+        assign_shot_lora_to_transformer(transformer, [])
+    CustomLinear.runtime_context = None
+
     transformer.teacache_state.clear_all()
     transformer.magcache_state.clear_all()
     transformer.easycache_state.clear_all()
