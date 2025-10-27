@@ -110,6 +110,9 @@ class CustomLinear(nn.Linear):
                     continue
             elif lora_strength == 0.0:
                 continue
+            if len(lora_diff) == 1:
+                weight = weight.add(lora_diff[0].to(weight.device), alpha=lora_strength)
+                continue
             patch_diff = torch.mm(
                 lora_diff[0].flatten(start_dim=1).to(weight.device),
                 lora_diff[1].flatten(start_dim=1).to(weight.device)
