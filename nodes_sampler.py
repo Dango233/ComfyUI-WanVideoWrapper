@@ -180,6 +180,9 @@ def assign_shot_lora_to_transformer(transformer, shot_lora_payload):
 
 
 def offload_transformer(transformer):    
+    # Clear any per-shot LoRA references so offloading can release memory promptly
+    if "assign_shot_lora_to_transformer" in globals():
+        assign_shot_lora_to_transformer(transformer, [])
     CustomLinear.runtime_context = None
 
     transformer.teacache_state.clear_all()
@@ -3236,8 +3239,6 @@ class WanVideoSampler:
                 log.error(f"Error during sampling: {e}")
                 if force_offload:
                     if not model["auto_cpu_offload"]:
-                        if "assign_shot_lora_to_transformer" in globals():
-                            assign_shot_lora_to_transformer(transformer, [])
                         offload_transformer(transformer)
                 raise e
 
@@ -3259,8 +3260,6 @@ class WanVideoSampler:
 
         if force_offload:
             if not model["auto_cpu_offload"]:
-                if "assign_shot_lora_to_transformer" in globals():
-                    assign_shot_lora_to_transformer(transformer, [])
                 offload_transformer(transformer)
 
         try:
