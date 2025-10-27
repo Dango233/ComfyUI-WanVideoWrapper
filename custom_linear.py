@@ -91,6 +91,25 @@ class CustomLinear(nn.Linear):
         self.shot_lora = []
         self.shot_lora_key = None
 
+    def clear_shot_lora_cache(self):
+        """Release any cached per-device LoRA weights to help free VRAM."""
+        if not hasattr(self, "shot_lora") or not self.shot_lora:
+            return
+        for components in self.shot_lora:
+            if not components:
+                continue
+            for component in components:
+                if not isinstance(component, dict):
+                    continue
+                cache = component.get("cache")
+                if cache:
+                    for pair in cache.values():
+                        if isinstance(pair, tuple):
+                            for tensor in pair:
+                                if isinstance(tensor, torch.Tensor):
+                                    del tensor
+                    cache.clear()
+
     def forward(self, input):
         if self.bias is not None:
             bias = self.bias.to(input)
@@ -251,6 +270,8 @@ class CustomLinear(nn.Linear):
 
 def remove_lora_from_module(module):
     for name, submodule in module.named_modules():
+        if isinstance(submodule, CustomLinear):
+            submodule.clear_shot_lora_cache()
         submodule.lora = None
 
 
@@ -260,6 +281,7 @@ def set_shot_lora_params(module, shot_payload, module_prefix=""):
         set_shot_lora_params(child, shot_payload, child_prefix)
 
     if isinstance(module, CustomLinear):
+        module.clear_shot_lora_cache()
         key = f"diffusion_model.{module_prefix}weight"
         shot_components = shot_payload.get(key)
         if shot_components is None and "_orig_mod." in key:
