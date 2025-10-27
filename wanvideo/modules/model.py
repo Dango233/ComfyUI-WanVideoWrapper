@@ -2460,7 +2460,7 @@ class WanModel(torch.nn.Module):
         if mask_mode not in valid_mask_modes:
             raise ValueError(f"Shot mask mode '{mask_mode}' is not supported. Expected one of {sorted(valid_mask_modes)}.")
 
-        if shot_indices_tensor is not None and isinstance(x, (list, tuple)) and len(x) > 0:
+        if shot_indices_tensor is not None and isinstance(x, (list, tuple)) and len(x) > 0 and shot_backend != "full":
             sample_channels = x[0].shape[0]
             expected_in_channels = self.original_patch_embedding.weight.shape[1]
             if expected_in_channels == sample_channels + 1:
@@ -2562,19 +2562,22 @@ class WanModel(torch.nn.Module):
             else:
                 pooled_tokens = spatial_tokens  # fallback when backend == "full"
             pooled_tokens = max(1, min(spatial_tokens, pooled_tokens))
-            shot_block_config = {
-                "indices": shot_latent_cuts,
-                "global_tokens": pooled_tokens,
-                "mode": shot_mode,
-                "backend": shot_backend,
-                "prefix_tokens": prefix_tokens,
-            }
-            if token_mode is not None:
-                shot_block_config["token_mode"] = token_mode
-                if token_mode == "ratio":
-                    shot_block_config["token_ratio"] = token_ratio
-                else:
-                    shot_block_config["token_absolute"] = token_absolute
+            if shot_backend == "full":
+                shot_block_config = None
+            else:
+                shot_block_config = {
+                    "indices": shot_latent_cuts,
+                    "global_tokens": pooled_tokens,
+                    "mode": shot_mode,
+                    "backend": shot_backend,
+                    "prefix_tokens": prefix_tokens,
+                }
+                if token_mode is not None:
+                    shot_block_config["token_mode"] = token_mode
+                    if token_mode == "ratio":
+                        shot_block_config["token_ratio"] = token_ratio
+                    else:
+                        shot_block_config["token_absolute"] = token_absolute
         else:
             CustomLinear.runtime_context = None
 
