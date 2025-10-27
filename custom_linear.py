@@ -243,8 +243,11 @@ class CustomLinear(nn.Linear):
                 else:
                     continue
 
-                alpha_value = float(component.get("alpha", 1.0))
-                scale = strength_value * (alpha_value / max(rank, 1))
+                alpha_entry = component.get("alpha")
+                if alpha_entry is None:
+                    scale = strength_value
+                else:
+                    scale = strength_value * (float(alpha_entry) / max(rank, 1))
 
                 low_rank = torch.matmul(shot_input, down_for_mul.transpose(0, 1))
                 contribution = torch.matmul(low_rank, up_for_mul.transpose(0, 1))

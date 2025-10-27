@@ -128,7 +128,7 @@ def prepare_shot_lora_payload(base_model, shot_lora_specs):
                 up_cpu = up_tensor.to(torch.float32).cpu().contiguous()
                 down_cpu = down_tensor.to(torch.float32).cpu().contiguous()
 
-                alpha_value = 1.0
+                alpha_value = None
                 if isinstance(alpha_entry, torch.Tensor):
                     alpha_value = float(alpha_entry.item())
                 elif isinstance(alpha_entry, (int, float)):
@@ -138,11 +138,13 @@ def prepare_shot_lora_payload(base_model, shot_lora_specs):
 
                 component = {
                     "strength": strength_value,
-                    "alpha": alpha_value,
                     "up": up_cpu,
                     "down": down_cpu,
                     "rank": rank_hint,
                 }
+
+                if alpha_value is not None:
+                    component["alpha"] = alpha_value
 
                 shot_patch.setdefault(mapped_key, []).append(component)
 
