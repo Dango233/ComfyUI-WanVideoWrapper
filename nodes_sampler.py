@@ -322,10 +322,10 @@ class WanVideoSampler:
         else:
             shot_attention_cfg = dict(model_shot_cfg)
             shot_attention_cfg.setdefault("enabled", True)
-            shot_attention_cfg.setdefault("mode", "firstk")
-            shot_attention_cfg.setdefault("mask_type", "none")
+            shot_attention_cfg["mode"] = "firstk"
+            shot_attention_cfg.setdefault("mask_type", "id")
             shot_attention_cfg.setdefault("backend", "auto")
-            shot_attention_cfg.setdefault("global_token_ratio_or_number", 0.25)
+            shot_attention_cfg.setdefault("global_token_ratio_or_number", 1.0)
             shot_mask_type = shot_attention_cfg.get("mask_type")
 
         shot_lora_specs = holocine_args.get("shot_loras") if args_present else None
