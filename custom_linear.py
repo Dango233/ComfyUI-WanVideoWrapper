@@ -199,17 +199,8 @@ class CustomLinear(nn.Linear):
                 if strength_value == 0.0:
                     continue
 
-                component_cache = component.setdefault("cache", {})
-                cache_key = (device, dtype)
-                cached_pair = component_cache.get(cache_key)
-                if cached_pair is None:
-                    cached_pair = (
-                        component["up"].to(device=device, dtype=dtype, non_blocking=True),
-                        component["down"].to(device=device, dtype=dtype, non_blocking=True),
-                    )
-                    component_cache[cache_key] = cached_pair
-
-                up_weight, down_weight = cached_pair
+                up_weight = component["up"].to(device=device, dtype=dtype, non_blocking=True)
+                down_weight = component["down"].to(device=device, dtype=dtype, non_blocking=True)
 
                 if up_weight.ndim != 2 or down_weight.ndim != 2:
                     continue

@@ -182,9 +182,6 @@ def prepare_shot_lora_payload(base_model, shot_lora_specs):
                     rank = down_tensor.shape[1]
                 component["rank"] = rank
 
-                cache = component.setdefault("cache", {})
-                cache.clear()
-
                 shot_patch.setdefault(key, []).append(component)
 
             del lora_sd
