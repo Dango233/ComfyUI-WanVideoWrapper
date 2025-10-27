@@ -173,15 +173,8 @@ class CustomLinear(nn.Linear):
                 if strength_value == 0.0:
                     continue
 
-                weights_cache = component.setdefault("cache", {})
-                cache_key = (device, dtype)
-                cached_entry = weights_cache.get(cache_key)
-                if cached_entry is None:
-                    up_weight = component["up"].to(device=device, dtype=dtype)
-                    down_weight = component["down"].to(device=device, dtype=dtype)
-                    weights_cache[cache_key] = (up_weight, down_weight)
-                else:
-                    up_weight, down_weight = cached_entry
+                up_weight = component["up"].to(device=device, dtype=dtype)
+                down_weight = component["down"].to(device=device, dtype=dtype)
 
                 rank = down_weight.shape[0] if down_weight.dim() >= 2 else 1
                 alpha = component.get("alpha", 1.0)
@@ -190,6 +183,7 @@ class CustomLinear(nn.Linear):
                 low_rank = torch.nn.functional.linear(shot_input, down_weight, None)
                 contribution = torch.nn.functional.linear(low_rank, up_weight, None)
                 del low_rank
+                del up_weight, down_weight
 
                 contribution = contribution * scale
                 shot_delta = contribution if shot_delta is None else (shot_delta + contribution)
