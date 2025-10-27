@@ -392,22 +392,10 @@ class WanFusedRMSNorm(nn.RMSNorm):
             
         return output
 
-import torch.nn.functional as F
 class WanLayerNorm(nn.LayerNorm):
 
     def __init__(self, dim, eps=1e-6, elementwise_affine=False):
         super().__init__(dim, elementwise_affine=elementwise_affine, eps=eps)
-
-    # def forward(self, inputs: torch.Tensor) -> torch.Tensor:
-    #     origin_dtype = inputs.dtype
-    #     out = F.layer_norm(
-    #         inputs.float(), 
-    #         self.normalized_shape, 
-    #         None if self.weight is None else self.weight.float(), 
-    #         None if self.bias is None else self.bias.float() ,
-    #         self.eps
-    #     ).to(origin_dtype)
-    #     return out
 
     def forward(self, x):
         r"""
