@@ -93,60 +93,68 @@ def prepare_shot_lora_payload(base_model, shot_lora_specs):
                     log.warning(f"Skipping LoRA adapter for key {key}: training conversion not supported for per-shot application.")
                     continue
 
-                train_adapter = None
-                try:
-                    train_adapter = adapter.to_train()
-                except Exception as exc:
-                    log.warning(f"Failed to convert LoRA adapter for key {key}: {exc}")
-
                 up_tensor = None
                 down_tensor = None
                 alpha_value = 1.0
 
-                if train_adapter is not None:
-                    lora_up = getattr(train_adapter, "lora_up", None)
-                    lora_down = getattr(train_adapter, "lora_down", None)
-                    lora_mid = getattr(train_adapter, "lora_mid", None)
+                weights_entry = getattr(adapter, "weights", None)
+                if (
+                    isinstance(weights_entry, tuple)
+                    and len(weights_entry) >= 2
+                    and isinstance(weights_entry[0], torch.Tensor)
+                    and isinstance(weights_entry[1], torch.Tensor)
+                ):
+                    mid_entry = weights_entry[3] if len(weights_entry) > 3 else None
+                    dora_entry = weights_entry[4] if len(weights_entry) > 4 else None
+                    reshape_entry = weights_entry[5] if len(weights_entry) > 5 else None
+                    if mid_entry is not None:
+                        log.warning(f"Skipping LoRA adapter for key {key}: LoRA with intermediate convolution is not supported per shot.")
+                        continue
+                    if dora_entry is not None:
+                        log.warning(f"Skipping LoRA adapter for key {key}: DoRA-style scaling is not supported per shot.")
+                        continue
+                    if reshape_entry not in (None, []) and reshape_entry != []:
+                        log.warning(f"Skipping LoRA adapter for key {key}: reshape metadata is not supported per shot.")
+                        continue
 
-                    if isinstance(lora_up, torch.nn.Linear) and isinstance(lora_down, torch.nn.Linear) and lora_mid is None:
-                        up_tensor = lora_up.weight.detach()
-                        down_tensor = lora_down.weight.detach()
-                        alpha_attr = getattr(train_adapter, "alpha", None)
-                        if isinstance(alpha_attr, torch.Tensor):
-                            alpha_value = float(alpha_attr.item())
-                        elif isinstance(alpha_attr, (int, float)):
-                            alpha_value = float(alpha_attr)
-                        else:
-                            alpha_value = 1.0
+                    up_tensor = weights_entry[0]
+                    down_tensor = weights_entry[1]
+                    alpha_entry = weights_entry[2] if len(weights_entry) > 2 else None
+                    if isinstance(alpha_entry, torch.Tensor):
+                        alpha_value = float(alpha_entry.item())
+                    elif isinstance(alpha_entry, (int, float)):
+                        alpha_value = float(alpha_entry)
                     else:
-                        if lora_mid is not None:
-                            log.warning(f"Skipping LoRA adapter for key {key}: LoRA with intermediate convolution is not supported per shot.")
-                        else:
-                            log.warning(f"Skipping LoRA adapter for key {key}: only linear LoRA layers are supported per shot.")
+                        alpha_value = 1.0
+                else:
+                    train_adapter = None
+                    try:
+                        train_adapter = adapter.to_train()
+                    except Exception as exc:
+                        log.warning(f"Failed to convert LoRA adapter for key {key}: {exc}")
 
-                if up_tensor is None or down_tensor is None:
-                    weights_entry = getattr(adapter, "weights", None)
-                    if (
-                        isinstance(weights_entry, tuple)
-                        and len(weights_entry) >= 2
-                        and isinstance(weights_entry[0], torch.Tensor)
-                        and isinstance(weights_entry[1], torch.Tensor)
-                    ):
-                        if len(weights_entry) > 3 and weights_entry[3] is not None:
-                            log.warning(f"Skipping LoRA adapter for key {key}: LoRA with intermediate convolution is not supported per shot.")
+                    if train_adapter is not None:
+                        lora_up = getattr(train_adapter, "lora_up", None)
+                        lora_down = getattr(train_adapter, "lora_down", None)
+                        lora_mid = getattr(train_adapter, "lora_mid", None)
+
+                        if isinstance(lora_up, torch.nn.Linear) and isinstance(lora_down, torch.nn.Linear) and lora_mid is None:
+                            up_tensor = lora_up.weight.detach()
+                            down_tensor = lora_down.weight.detach()
+                            alpha_attr = getattr(train_adapter, "alpha", None)
+                            if isinstance(alpha_attr, torch.Tensor):
+                                alpha_value = float(alpha_attr.item())
+                            elif isinstance(alpha_attr, (int, float)):
+                                alpha_value = float(alpha_attr)
+                            else:
+                                alpha_value = 1.0
+                        else:
+                            if lora_mid is not None:
+                                log.warning(f"Skipping LoRA adapter for key {key}: LoRA with intermediate convolution is not supported per shot.")
+                            else:
+                                log.warning(f"Skipping LoRA adapter for key {key}: only linear LoRA layers are supported per shot.")
                             continue
-                        up_tensor = weights_entry[0]
-                        down_tensor = weights_entry[1]
-                        alpha_entry = weights_entry[2] if len(weights_entry) > 2 else None
-                        if isinstance(alpha_entry, torch.Tensor):
-                            alpha_value = float(alpha_entry.item())
-                        elif isinstance(alpha_entry, (int, float)):
-                            alpha_value = float(alpha_entry)
-                        else:
-                            alpha_value = alpha_value
                     else:
-                        if train_adapter is None:
-                            log.warning(f"Skipping LoRA adapter for key {key}: unsupported format for per-shot application.")
                         continue
 
                 if up_tensor is None or down_tensor is None:
