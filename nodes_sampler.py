@@ -108,7 +108,6 @@ def prepare_shot_lora_payload(base_model, shot_lora_specs):
                     "up": up_weight,
                     "down": down_weight,
                     "alpha": alpha_value,
-                    "cache": {},
                 })
 
                 del train_adapter
