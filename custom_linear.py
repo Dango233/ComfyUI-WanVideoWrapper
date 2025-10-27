@@ -88,7 +88,7 @@ class CustomLinear(nn.Linear):
         self.shot_lora_key = None
 
     def clear_shot_lora_cache(self):
-        self.shot_lora = []
+        return
 
     def forward(self, input):
         if self.bias is not None:
