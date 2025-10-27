@@ -182,13 +182,16 @@ class CustomLinear(nn.Linear):
                 diff_weight = diff_cache.get(cache_key)
                 if diff_weight is None or diff_weight.device != device or diff_weight.dtype != dtype:
                     base_weight = weight.detach()
+                    calc_function = component.get("function")
+                    if calc_function is None:
+                        calc_function = lambda tensor: tensor
                     diff_weight = adapter.calculate_weight(
                         base_weight,
                         "shot_lora",
                         1.0,
                         1.0,
                         None,
-                        None,
+                        calc_function,
                         intermediate_dtype=base_weight.dtype,
                         original_weight=base_weight,
                     ) - base_weight
