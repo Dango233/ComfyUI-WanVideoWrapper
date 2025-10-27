@@ -105,8 +105,8 @@ def prepare_shot_lora_payload(base_model, shot_lora_specs):
                     up_linear = getattr(train_adapter, "lora_up", None)
                     down_linear = getattr(train_adapter, "lora_down", None)
                     if isinstance(up_linear, torch.nn.Linear) and isinstance(down_linear, torch.nn.Linear):
-                        up_tensor = up_linear.weight.detach()
-                        down_tensor = down_linear.weight.detach()
+                        up_tensor = up_linear.weight
+                        down_tensor = down_linear.weight
                         alpha_attr = getattr(train_adapter, "alpha", None)
                         if isinstance(alpha_attr, torch.Tensor):
                             alpha_value = float(alpha_attr.item())
@@ -124,8 +124,8 @@ def prepare_shot_lora_payload(base_model, shot_lora_specs):
                             and isinstance(weights_entry[1], torch.Tensor)
                             and weights_entry[0] is not None
                             and weights_entry[1] is not None):
-                        up_tensor = weights_entry[0].detach()
-                        down_tensor = weights_entry[1].detach()
+                        up_tensor = weights_entry[0]
+                        down_tensor = weights_entry[1]
                         alpha_entry = weights_entry[2] if len(weights_entry) > 2 else None
                         if isinstance(alpha_entry, torch.Tensor):
                             alpha_value = float(alpha_entry.item())
@@ -144,13 +144,16 @@ def prepare_shot_lora_payload(base_model, shot_lora_specs):
                     continue
 
                 if up_tensor.shape[0] != down_tensor.shape[0]:
-                    log.warning(f"Skipping LoRA adapter for key {key}: incompatible low-rank dimensions {up_tensor.shape} vs {down_tensor.shape}.")
-                    continue
+                    if up_tensor.ndim == 2 and down_tensor.ndim == 2 and up_tensor.shape[0] == down_tensor.shape[1]:
+                        down_tensor = down_tensor.transpose(0, 1)
+                    else:
+                        log.warning(f"Skipping LoRA adapter for key {key}: incompatible low-rank dimensions {up_tensor.shape} vs {down_tensor.shape}.")
+                        continue
 
                 shot_patch.setdefault(key, []).append({
                     "strength": strength_value,
-                    "up": up_tensor.to(torch.float32).cpu(),
-                    "down": down_tensor.to(torch.float32).cpu(),
+                    "up": up_tensor.detach().to(torch.float32).cpu(),
+                    "down": down_tensor.detach().to(torch.float32).cpu(),
                     "alpha": alpha_value,
                 })
 
