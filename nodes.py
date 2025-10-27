@@ -390,7 +390,7 @@ class WanVideoHolocineSetShotAttention:
                 "model": ("WANVIDEOMODEL",),
                 "enable": ("BOOLEAN", {"default": False, "tooltip": "Toggle shot-aware sparse attention."}),
                 "global_token_ratio_or_number": ("FLOAT", {
-                    "default": 0.25,
+                    "default": 1.0,
                     "min": 0.0,
                     "max": 32768.0,
                     "step": 0.01,
@@ -398,8 +398,10 @@ class WanVideoHolocineSetShotAttention:
                 }),
             },
             "optional": {
-                "pooling_mode": (["firstk", "linspace", "mean"], {"default": "firstk", "tooltip": "Representative selection strategy per shot."}),
-                "mask_type": (["none", "normalized", "alternating"], {"default": "none", "tooltip": "Reserved for future shot-mask features."}),
+                "mask_type": (["id", "normalized", "alternating"], {
+                    "default": "id",
+                    "tooltip": "Shot mask variant: raw IDs, normalized IDs, or alternating parity. Matches HoloCine defaults."
+                }),
                 "backend": (["auto", "sparse_flash_attn", "sparse_fallback", "full"], {
                     "default": "auto",
                     "tooltip": "Select sparse FlashAttention backend or PyTorch fallback; full disables sparse sampling."
@@ -413,7 +415,7 @@ class WanVideoHolocineSetShotAttention:
     FUNCTION = "apply"
     CATEGORY = "WanVideoWrapper/Holocine"
 
-    def apply(self, model, enable, global_token_ratio_or_number, pooling_mode="firstk", mask_type="none", backend="auto", i2v_mode=False):
+    def apply(self, model, enable, global_token_ratio_or_number, mask_type="id", backend="auto", i2v_mode=False):
         value = float(global_token_ratio_or_number)
         if value <= 0.0:
             raise ValueError("global_token_ratio_or_number must be > 0. Use values ≤ 1.0 for ratios or integers ≥ 64 for absolute counts.")
@@ -425,7 +427,7 @@ class WanVideoHolocineSetShotAttention:
         transformer_options["shot_attention"] = {
             "enabled": bool(enable),
             "global_token_ratio_or_number": value,
-            "mode": pooling_mode,
+            "mode": "firstk",
             "mask_type": mask_type,
             "backend": backend,
             "i2v_mode": bool(i2v_mode),

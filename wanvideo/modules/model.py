@@ -2364,7 +2364,7 @@ class WanModel(torch.nn.Module):
         token_ratio = None
         token_absolute = None
         if shot_attention_enabled:
-            raw_token_value = shot_attention_cfg.get("global_token_ratio_or_number", 0.25)
+            raw_token_value = shot_attention_cfg.get("global_token_ratio_or_number", 1.0)
             if not isinstance(raw_token_value, (int, float)):
                 raise ValueError(f"Shot attention expected a numeric global_token_ratio_or_number value, got {type(raw_token_value).__name__} instead.")
             raw_token_value = float(raw_token_value)
@@ -2431,8 +2431,12 @@ class WanModel(torch.nn.Module):
 
         # patch embed
         # Append shot mask feature (Holocine-style) when available and supported
-        mask_mode = (shot_mask_type or "none").lower() if shot_mask_type is not None else "none"
-        if mask_mode not in ("none", "") and shot_indices_tensor is not None and isinstance(x, (list, tuple)) and len(x) > 0:
+        mask_mode = (shot_mask_type or "id").lower()
+        valid_mask_modes = {"id", "normalized", "alternating"}
+        if mask_mode not in valid_mask_modes:
+            raise ValueError(f"Shot mask mode '{mask_mode}' is not supported. Expected one of {sorted(valid_mask_modes)}.")
+
+        if shot_indices_tensor is not None and isinstance(x, (list, tuple)) and len(x) > 0:
             sample_channels = x[0].shape[0]
             expected_in_channels = self.original_patch_embedding.weight.shape[1]
             if expected_in_channels == sample_channels + 1:
@@ -2443,8 +2447,7 @@ class WanModel(torch.nn.Module):
                     mask_values = shot_indices_float
                 elif mask_mode == "normalized":
                     if num_shots > 1:
-                        denom = float(max(num_shots - 1, 1))
-                        mask_values = shot_indices_float / denom
+                        mask_values = shot_indices_float / 20.0
                     else:
                         mask_values = torch.zeros_like(shot_indices_float)
                 elif mask_mode == "alternating":
