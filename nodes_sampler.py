@@ -995,12 +995,11 @@ class WanVideoSampler:
         # Experimental args
         use_cfg_zero_star = use_tangential = use_fresca = bidirectional_sampling = use_tsr = False
         raag_alpha = 0.0
+        transformer.video_attention_split_steps = []
         if experimental_args is not None:
             video_attention_split_steps = experimental_args.get("video_attention_split_steps", [])
             if video_attention_split_steps:
-                transformer.video_attention_split_steps = [int(x.strip()) for x in video_attention_split_steps.split(",")]
-            else:
-                transformer.video_attention_split_steps = []
+                transformer.video_attention_split_steps = [int(x.strip()) for x in video_attention_split_steps.split(",")]                
 
             use_zero_init = experimental_args.get("use_zero_init", True)
             use_cfg_zero_star = experimental_args.get("cfg_zero_star", False)
