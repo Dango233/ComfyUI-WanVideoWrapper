@@ -4,6 +4,8 @@ import torch
 import torch.nn as nn
 from accelerate import init_empty_weights
 
+import comfy.lora as comfy_lora
+
 #based on https://github.com/huggingface/diffusers/blob/main/src/diffusers/quantizers/gguf/utils.py
 def _replace_linear(model, compute_dtype, state_dict, prefix="", patches=None, scale_weights=None):
    
@@ -105,12 +107,7 @@ class CustomLinear(nn.Linear):
                 if not isinstance(component, dict):
                     continue
                 cache = component.get("cache")
-                if cache:
-                    for pair in cache.values():
-                        if isinstance(pair, tuple):
-                            for tensor in pair:
-                                if isinstance(tensor, torch.Tensor):
-                                    del tensor
+                if isinstance(cache, dict):
                     cache.clear()
 
     def forward(self, input):
@@ -210,59 +207,31 @@ class CustomLinear(nn.Linear):
             shot_input = flat_input.index_select(0, indices)
             shot_delta = None
             for component in components:
-                if component is None:
+                if not isinstance(component, dict):
                     continue
-                strength = component.get("strength", 1.0)
-                if isinstance(strength, list):
-                    if current_step >= len(strength):
+
+                strength_entry = component.get("strength", 1.0)
+                if isinstance(strength_entry, list):
+                    if current_step >= len(strength_entry):
                         continue
-                    strength_value = float(strength[current_step])
+                    strength_value = float(strength_entry[current_step])
                 else:
-                    strength_value = float(strength)
+                    strength_value = float(strength_entry)
                 if strength_value == 0.0:
                     continue
 
-                up_weight = component["up"].to(device=device, dtype=dtype, non_blocking=True)
-                down_weight = component["down"].to(device=device, dtype=dtype, non_blocking=True)
-
-                if up_weight.ndim != 2 or down_weight.ndim != 2:
+                delta_weight = self._get_shot_delta_weight(
+                    component,
+                    weight,
+                    strength_value,
+                    current_step,
+                    device,
+                    dtype,
+                )
+                if delta_weight is None:
                     continue
 
-                in_dim = shot_input.shape[1]
-                out_dim = flat_output.shape[1]
-
-                # Ensure down_weight orientation -> (rank, in_dim)
-                if down_weight.shape[1] == in_dim:
-                    down_for_mul = down_weight
-                elif down_weight.shape[0] == in_dim:
-                    down_for_mul = down_weight.transpose(0, 1)
-                else:
-                    # fall back to stored rank if available
-                    rank_hint = component.get("rank")
-                    if rank_hint is not None and down_weight.shape[0] == rank_hint:
-                        down_for_mul = down_weight
-                    elif rank_hint is not None and down_weight.shape[1] == rank_hint:
-                        down_for_mul = down_weight.transpose(0, 1)
-                    else:
-                        continue
-
-                rank = down_for_mul.shape[0]
-
-                # Ensure up_weight orientation -> (out_dim, rank)
-                if up_weight.shape[0] == out_dim and up_weight.shape[1] == rank:
-                    up_for_mul = up_weight
-                elif up_weight.shape[1] == out_dim and up_weight.shape[0] == rank:
-                    up_for_mul = up_weight.transpose(0, 1)
-                else:
-                    continue
-
-                alpha = component.get("alpha", 1.0)
-                scale = strength_value * (alpha / max(rank, 1))
-
-                low_rank = torch.matmul(shot_input, down_for_mul.transpose(0, 1))
-                contribution = torch.matmul(low_rank, up_for_mul.transpose(0, 1))
-
-                contribution = contribution * scale
+                contribution = torch.nn.functional.linear(shot_input, delta_weight)
                 shot_delta = contribution if shot_delta is None else (shot_delta + contribution)
 
             if shot_delta is not None:
@@ -281,6 +250,48 @@ class CustomLinear(nn.Linear):
                         )
 
         return flat_output.view_as(output)
+
+    def _get_shot_delta_weight(self, component, base_weight, strength_value, current_step, device, dtype):
+        cache = component.setdefault("cache", {})
+        cache_key = (device, dtype, strength_value, current_step)
+        delta = cache.get(cache_key)
+
+        if delta is None:
+            patch_value = component.get("patch")
+            strength_model = component.get("strength_model", 1.0)
+            offset = component.get("offset")
+            function = component.get("function")
+            key = component.get("key")
+
+            if patch_value is None or key is None:
+                return None
+
+            base_clone = base_weight.detach().clone()
+            patches = [(strength_value, patch_value, strength_model, offset, function)]
+            try:
+                updated = comfy_lora.calculate_weight(
+                    patches,
+                    base_clone,
+                    key,
+                    intermediate_dtype=torch.float32,
+                    original_weights=None,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "Shot LoRA calculate_weight failed: module=%s key=%s err=%s",
+                    getattr(self, "shot_lora_key", None) or hex(id(self)),
+                    key,
+                    exc,
+                )
+                component.setdefault("_failed_steps", set()).add(current_step)
+                return None
+
+            delta = (updated - base_weight).to(device=device, dtype=dtype)
+            if not delta.is_contiguous():
+                delta = delta.contiguous()
+            cache[cache_key] = delta
+
+        return delta
 
 def remove_lora_from_module(module):
     for name, submodule in module.named_modules():
