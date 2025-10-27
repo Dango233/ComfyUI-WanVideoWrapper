@@ -106,7 +106,7 @@ def prepare_shot_lora_payload(base_model, shot_lora_specs):
                     "offset": offset,
                     "function": function,
                     "key": mapped_key,
-                    "cache": {},
+                    "cache": None,
                 }
 
                 shot_patch.setdefault(mapped_key, []).append(component)
