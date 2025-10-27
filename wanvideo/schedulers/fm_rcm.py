@@ -38,9 +38,3 @@ class rCMFlowMatchScheduler():
             ).to(x)
         self.step_index += 1
         return x
-
-
-class rCMRevisionFlowMatchScheduler(rCMFlowMatchScheduler):
-    """Variant that keeps the original RCM schedule but allows updated
-    denoising-strength handling downstream."""
-    pass
