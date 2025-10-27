@@ -1,5 +1,3 @@
-import logging
-import os
 import torch
 import torch.nn as nn
 from accelerate import init_empty_weights
@@ -67,9 +65,6 @@ def set_lora_params(module, patches, module_prefix=""):
             module.step = 0  # Initialize step for LoRA scheduling
 
 
-logger = logging.getLogger("wan_shot_lora")
-
-
 class CustomLinear(nn.Linear):
     runtime_context = None
 
@@ -91,8 +86,6 @@ class CustomLinear(nn.Linear):
         self.weight_function = []
         self.shot_lora = []
         self.shot_lora_key = None
-        self._global_debug_seen = set()
-        self._global_debug_last_step = None
 
     def clear_shot_lora_cache(self):
         return
@@ -122,11 +115,6 @@ class CustomLinear(nn.Linear):
 
     @torch.compiler.disable()
     def apply_lora(self, weight):
-        debug_flag = os.environ.get("WAN_GLOBAL_LORA_DEBUG", "0").lower() in ("1", "true", "yes")
-        current_step = getattr(self, "step", 0)
-        if debug_flag and self._global_debug_last_step != current_step:
-            self._global_debug_seen.clear()
-            self._global_debug_last_step = current_step
         for lora_diff, lora_strength in zip(self.lora[0], self.lora[1]):
             if isinstance(lora_strength, list):
                 lora_strength = lora_strength[self.step]
@@ -140,21 +128,6 @@ class CustomLinear(nn.Linear):
             ).reshape(weight.shape)
             alpha = lora_diff[2] / lora_diff[1].shape[0] if lora_diff[2] is not None else 1.0
             scale = lora_strength * alpha
-            if debug_flag:
-                module_identifier = getattr(self, "shot_lora_key", None) or hex(id(self))
-                debug_key = (id(lora_diff), current_step)
-                if debug_key not in self._global_debug_seen:
-                    self._global_debug_seen.add(debug_key)
-                    delta_mean = float((patch_diff * scale).abs().mean().item())
-                    logger.info(
-                        "Global LoRA applied: module=%s mean|delta|=%.6f strength=%.4f alpha=%.4f rank=%d step=%d",
-                        module_identifier,
-                        delta_mean,
-                        float(lora_strength),
-                        float(alpha),
-                        int(lora_diff[1].shape[0]),
-                        int(current_step),
-                    )
             weight = weight.add(patch_diff, alpha=scale)
         return weight
 
@@ -179,9 +152,6 @@ class CustomLinear(nn.Linear):
         device = flat_input.device
         dtype = flat_input.dtype
         current_step = ctx.get("current_step", 0)
-        debug_enabled = bool(ctx.get("debug_shot_lora", False))
-        module_identifier = getattr(self, "shot_lora_key", None) or hex(id(self))
-
         for shot_idx, components in enumerate(self.shot_lora):
             if not components:
                 continue
@@ -256,18 +226,6 @@ class CustomLinear(nn.Linear):
 
             if shot_delta is not None:
                 flat_output.index_add_(0, indices, shot_delta)
-                if debug_enabled:
-                    debug_seen = ctx.setdefault("debug_seen", set())
-                    debug_key = (module_identifier, shot_idx)
-                    if debug_key not in debug_seen:
-                        debug_seen.add(debug_key)
-                        delta_mean = float(shot_delta.abs().mean().item())
-                        logger.info(
-                            "Shot LoRA applied: module=%s shot=%d mean|delta|=%.6f",
-                            module_identifier,
-                            shot_idx,
-                            delta_mean,
-                        )
 
         return flat_output.view_as(output)
 
