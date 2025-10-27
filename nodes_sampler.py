@@ -48,12 +48,12 @@ class MetaParameter(torch.nn.Parameter):
         self.quant_type = quant_type
         return self
 
-def prepare_shot_lora_payload(base_model, shot_lora_specs):
+def prepare_shot_lora_payload(transformer, shot_lora_specs):
     """Load and organize per-shot LoRA adapters for Holocine workflows."""
     if not shot_lora_specs:
         return []
 
-    key_map = model_lora_keys_unet(base_model, {})
+    key_map = model_lora_keys_unet(transformer, {})
     payload = []
 
     for shot_idx, lora_entries in enumerate(shot_lora_specs):
@@ -88,65 +88,12 @@ def prepare_shot_lora_payload(base_model, shot_lora_specs):
 
             patch_dict = comfy_lora.load_lora(lora_sd, key_map, log_missing=False)
 
-            for raw_key, patch_value in patch_dict.items():
-                if isinstance(raw_key, str):
-                    mapped_key = raw_key
-                else:
-                    mapped_key = raw_key[0]
-
-                weights_tuple = getattr(patch_value, "weights", None)
-                if (
-                    not isinstance(weights_tuple, tuple)
-                    or len(weights_tuple) < 2
-                    or not isinstance(weights_tuple[0], torch.Tensor)
-                    or not isinstance(weights_tuple[1], torch.Tensor)
-                ):
-                    log.warning(
-                        f"Shot LoRA entry {mapped_key} is not a standard linear LoRA and will be skipped in per-shot mode."
-                    )
-                    continue
-
-                up_tensor = weights_tuple[0]
-                down_tensor = weights_tuple[1]
-                alpha_entry = weights_tuple[2] if len(weights_tuple) > 2 else None
-                mid_entry = weights_tuple[3] if len(weights_tuple) > 3 else None
-                dora_entry = weights_tuple[4] if len(weights_tuple) > 4 else None
-                reshape_entry = weights_tuple[5] if len(weights_tuple) > 5 else None
-
-                if mid_entry is not None or dora_entry is not None or (reshape_entry not in (None, [])):
-                    log.warning(
-                        f"Shot LoRA entry {mapped_key} requires non-linear adapter features and will be skipped in per-shot mode."
-                    )
-                    continue
-
-                if up_tensor.ndim != 2 or down_tensor.ndim != 2:
-                    log.warning(
-                        f"Shot LoRA entry {mapped_key} has unexpected tensor rank (up {up_tensor.ndim}, down {down_tensor.ndim}); skipping."
-                    )
-                    continue
-
-                up_cpu = up_tensor.to(torch.float32).cpu().contiguous()
-                down_cpu = down_tensor.to(torch.float32).cpu().contiguous()
-
-                alpha_value = None
-                if isinstance(alpha_entry, torch.Tensor):
-                    alpha_value = float(alpha_entry.item())
-                elif isinstance(alpha_entry, (int, float)):
-                    alpha_value = float(alpha_entry)
-
-                rank_hint = min(up_cpu.shape[0], up_cpu.shape[1], down_cpu.shape[0], down_cpu.shape[1])
-
-                component = {
+            for key, adapter in patch_dict.items():
+                adapter_copy = copy.deepcopy(adapter)
+                shot_patch.setdefault(key, []).append({
                     "strength": strength_value,
-                    "up": up_cpu,
-                    "down": down_cpu,
-                    "rank": rank_hint,
-                }
-
-                if alpha_value is not None:
-                    component["alpha"] = alpha_value
-
-                shot_patch.setdefault(mapped_key, []).append(component)
+                    "adapter": adapter_copy,
+                })
 
             del lora_sd
 
@@ -322,16 +269,16 @@ class WanVideoSampler:
         else:
             shot_attention_cfg = dict(model_shot_cfg)
             shot_attention_cfg.setdefault("enabled", True)
-            shot_attention_cfg["mode"] = "firstk"
-            shot_attention_cfg.setdefault("mask_type", "id")
+            shot_attention_cfg.setdefault("mode", "firstk")
+            shot_attention_cfg.setdefault("mask_type", "none")
             shot_attention_cfg.setdefault("backend", "auto")
-            shot_attention_cfg.setdefault("global_token_ratio_or_number", 1.0)
+            shot_attention_cfg.setdefault("global_token_ratio_or_number", 0.25)
             shot_mask_type = shot_attention_cfg.get("mask_type")
 
         shot_lora_specs = holocine_args.get("shot_loras") if args_present else None
         shot_lora_payload = []
         if shot_lora_specs:
-            shot_lora_payload = prepare_shot_lora_payload(patcher.model, shot_lora_specs)
+            shot_lora_payload = prepare_shot_lora_payload(transformer, shot_lora_specs)
             if all(len(entry) == 0 for entry in shot_lora_payload):
                 shot_lora_payload = []
         assign_shot_lora_to_transformer(transformer, shot_lora_payload)
@@ -350,11 +297,6 @@ class WanVideoSampler:
         vae_upscale_factor = 16 if is_5b else 8
 
         # Load weights
-        if transformer.audio_model is not None:
-            for block in transformer.blocks:
-                if hasattr(block, 'audio_block'):
-                    block.audio_block = None
-
         if not transformer.patched_linear and patcher.model["sd"] is not None and len(patcher.patches) != 0:
             transformer = _replace_linear(transformer, dtype, patcher.model["sd"])
             transformer.patched_linear = True
@@ -1198,11 +1140,12 @@ class WanVideoSampler:
         # Experimental args
         use_cfg_zero_star = use_tangential = use_fresca = bidirectional_sampling = use_tsr = False
         raag_alpha = 0.0
-        transformer.video_attention_split_steps = []
         if experimental_args is not None:
             video_attention_split_steps = experimental_args.get("video_attention_split_steps", [])
             if video_attention_split_steps:
-                transformer.video_attention_split_steps = [int(x.strip()) for x in video_attention_split_steps.split(",")]                
+                transformer.video_attention_split_steps = [int(x.strip()) for x in video_attention_split_steps.split(",")]
+            else:
+                transformer.video_attention_split_steps = []
 
             use_zero_init = experimental_args.get("use_zero_init", True)
             use_cfg_zero_star = experimental_args.get("cfg_zero_star", False)
@@ -1602,7 +1545,6 @@ class WanVideoSampler:
                     "ovi_negative_text_embeds": ovi_negative_text_embeds, # Audio latent model negative text embeds for Ovi
                     "flashvsr_LQ_latent": flashvsr_LQ_latent, # FlashVSR LQ latent for upsampling
                     "flashvsr_strength": flashvsr_strength, # FlashVSR strength
-                    "num_cond_latents": len(all_indices) if transformer.is_longcat else None # number of cond latents LongCat to separate attention
                 }
 
                 batch_size = 1
@@ -1902,7 +1844,7 @@ class WanVideoSampler:
                     current_step_percentage = idx / len(timesteps)
 
                     timestep = torch.tensor([t]).to(device)
-                    if is_pusa or ((is_5b or transformer.is_longcat) and all_indices):
+                    if is_pusa or (is_5b and all_indices):
                         orig_timestep = timestep
                         timestep = timestep.unsqueeze(1).repeat(1, latent_video_length)
                         if extra_latents is not None:
@@ -2463,11 +2405,7 @@ class WanVideoSampler:
                                 timesteps = [torch.tensor([t], device=device) for t in timesteps]
                                 timesteps = [timestep_transform(t, shift=shift, num_timesteps=1000) for t in timesteps]
                             else:
-                                if isinstance(scheduler, dict):
-                                    sample_scheduler = copy.deepcopy(scheduler["sample_scheduler"])
-                                    timesteps = scheduler["timesteps"]
-                                else:
-                                    sample_scheduler, timesteps,_,_ = get_scheduler(scheduler, total_steps, start_step, end_step, shift, device, transformer.dim, flowedit_args, denoise_strength, sigmas=sigmas)
+                                sample_scheduler, timesteps,_,_ = get_scheduler(scheduler, total_steps, start_step, end_step, shift, device, transformer.dim, flowedit_args, denoise_strength, sigmas=sigmas)
                                 timesteps = [torch.tensor([float(t)], device=device) for t in timesteps] + [torch.tensor([0.], device=device)]
 
                             # sample videos
@@ -2778,11 +2716,7 @@ class WanVideoSampler:
                             if s2v_pose is not None:
                                 s2v_pose_slice = pose_cond_list[r].to(device)
 
-                            if isinstance(scheduler, dict):
-                                sample_scheduler = copy.deepcopy(scheduler["sample_scheduler"])
-                                timesteps = scheduler["timesteps"]
-                            else:
-                                sample_scheduler, timesteps,_,_ = get_scheduler(scheduler, total_steps, start_step, end_step, shift, device, transformer.dim, flowedit_args, denoise_strength, sigmas=sigmas)
+                            sample_scheduler, timesteps,_,_ = get_scheduler(scheduler, total_steps, start_step, end_step, shift, device, transformer.dim, flowedit_args, denoise_strength, sigmas=sigmas)
 
                             latent = noise.to(device)
                             for i, t in enumerate(tqdm(timesteps, desc=f"Sampling audio indices {left_idx}-{right_idx}", position=0)):
@@ -2999,11 +2933,7 @@ class WanVideoSampler:
                                     thresholds = thresholds.reshape(-1, 1, 1, 1, 1).to(device)
                                     masks = (1-noise_mask.repeat(len(timesteps), 1, 1, 1, 1).to(device)) > thresholds
 
-                            if isinstance(scheduler, dict):
-                                sample_scheduler = copy.deepcopy(scheduler["sample_scheduler"])
-                                timesteps = scheduler["timesteps"]
-                            else:
-                                sample_scheduler, timesteps,_,_ = get_scheduler(scheduler, total_steps, start_step, end_step, shift, device, transformer.dim, flowedit_args, denoise_strength, sigmas=sigmas)
+                            sample_scheduler, timesteps,_,_ = get_scheduler(scheduler, total_steps, start_step, end_step, shift, device, transformer.dim, flowedit_args, denoise_strength, sigmas=sigmas)
 
                             # sample videos
                             latent = noise
@@ -3165,10 +3095,7 @@ class WanVideoSampler:
                         if use_tsr:
                             noise_pred = temporal_score_rescaling(noise_pred, latent, timestep, tsr_k, tsr_sigma)
 
-                        if transformer.is_longcat:
-                            noise_pred = -noise_pred
-
-                        if len(timestep.shape) != 1 and not is_pusa: #5b and longcat
+                        if len(timestep.shape) != 1 and not is_pusa: #5b
                             # all_indices is a list of indices to skip
                             total_indices = list(range(latent.shape[1]))
                             process_indices = [i for i in total_indices if i not in all_indices]
@@ -3299,36 +3226,10 @@ class WanVideoSampler:
             "samples": callback_latent.unsqueeze(0).cpu() if callback is not None else None,
         })
 
-class WanVideoSamplerSettings(WanVideoSampler):
-    RETURN_TYPES = ("SAMPLER_ARGS",)
-    RETURN_NAMES = ("sampler_inputs", )
-    DESCRIPTION = "Node to output all settings and inputs for the WanVideoSamplerFromSettings -node"
-    def process(self, *args, **kwargs):
-        import inspect
-        params = inspect.signature(WanVideoSampler.process).parameters
-        args_dict = {name: kwargs.get(name, param.default if param.default is not inspect.Parameter.empty else None)
-                     for name, param in params.items() if name != "self"}
-        return args_dict,
-
-class WanVideoSamplerFromSettings(WanVideoSampler):
-    DESCRIPTION = "Utility node with no other functionality than to look cleaner, useful for the live preview as the main sampler node has become a messy monster"
-    @classmethod
-    def INPUT_TYPES(s):
-        return {
-            "required": {
-                "sampler_inputs": ("SAMPLER_ARGS",),},
-        }
-
-    def process(self, sampler_inputs):
-        return super().process(**sampler_inputs)
 
 NODE_CLASS_MAPPINGS = {
     "WanVideoSampler": WanVideoSampler,
-    "WanVideoSamplerSettings": WanVideoSamplerSettings,
-    "WanVideoSamplerFromSettings": WanVideoSamplerFromSettings,
     }
 NODE_DISPLAY_NAME_MAPPINGS = {
     "WanVideoSampler": "WanVideo Sampler",
-    "WanVideoSamplerSettings": "WanVideo Sampler Settings",
-    "WanVideoSamplerFromSettings": "WanVideo Sampler From Settings",
 }

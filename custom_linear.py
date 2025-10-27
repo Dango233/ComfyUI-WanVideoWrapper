@@ -85,10 +85,6 @@ class CustomLinear(nn.Linear):
         self.bias_function = []
         self.weight_function = []
         self.shot_lora = []
-        self.shot_lora_key = None
-
-    def clear_shot_lora_cache(self):
-        return
 
     def forward(self, input):
         if self.bias is not None:
@@ -151,7 +147,9 @@ class CustomLinear(nn.Linear):
 
         device = flat_input.device
         dtype = flat_input.dtype
+        diff_cache = ctx.setdefault("diff_cache", {})
         current_step = ctx.get("current_step", 0)
+
         for shot_idx, components in enumerate(self.shot_lora):
             if not components:
                 continue
@@ -164,75 +162,50 @@ class CustomLinear(nn.Linear):
             shot_input = flat_input.index_select(0, indices)
             shot_delta = None
             for component in components:
-                if not isinstance(component, dict):
+                if component is None:
                     continue
-
-                strength_entry = component.get("strength", 1.0)
-                if isinstance(strength_entry, list):
-                    if current_step >= len(strength_entry):
+                strength = component.get("strength", 1.0)
+                if isinstance(strength, list):
+                    if current_step >= len(strength):
                         continue
-                    strength_value = float(strength_entry[current_step])
+                    strength_value = float(strength[current_step])
                 else:
-                    strength_value = float(strength_entry)
+                    strength_value = float(strength)
                 if strength_value == 0.0:
                     continue
 
-                up_weight = component.get("up")
-                down_weight = component.get("down")
-                if up_weight is None or down_weight is None:
+                adapter = component.get("adapter")
+                if adapter is None:
                     continue
 
-                up_weight = up_weight.to(device=device, dtype=dtype, non_blocking=True)
-                down_weight = down_weight.to(device=device, dtype=dtype, non_blocking=True)
+                cache_key = (id(self), id(adapter))
+                diff_weight = diff_cache.get(cache_key)
+                if diff_weight is None or diff_weight.device != device or diff_weight.dtype != dtype:
+                    base_weight = weight.detach()
+                    diff_weight = adapter.calculate_weight(
+                        base_weight,
+                        "shot_lora",
+                        1.0,
+                        1.0,
+                        None,
+                        None,
+                        intermediate_dtype=base_weight.dtype,
+                        original_weight=base_weight,
+                    ) - base_weight
+                    diff_weight = diff_weight.to(device=device, dtype=dtype)
+                    diff_cache[cache_key] = diff_weight
 
-                if up_weight.ndim != 2 or down_weight.ndim != 2:
-                    continue
-
-                in_dim = shot_input.shape[1]
-                out_dim = flat_output.shape[1]
-
-                if down_weight.shape[1] == in_dim:
-                    down_for_mul = down_weight
-                elif down_weight.shape[0] == in_dim:
-                    down_for_mul = down_weight.transpose(0, 1)
-                else:
-                    rank_hint = component.get("rank")
-                    if rank_hint is not None and down_weight.shape[0] == rank_hint:
-                        down_for_mul = down_weight
-                    elif rank_hint is not None and down_weight.shape[1] == rank_hint:
-                        down_for_mul = down_weight.transpose(0, 1)
-                    else:
-                        continue
-
-                rank = down_for_mul.shape[0]
-
-                if up_weight.shape[0] == out_dim and up_weight.shape[1] == rank:
-                    up_for_mul = up_weight
-                elif up_weight.shape[1] == out_dim and up_weight.shape[0] == rank:
-                    up_for_mul = up_weight.transpose(0, 1)
-                else:
-                    continue
-
-                alpha_entry = component.get("alpha")
-                if alpha_entry is None:
-                    scale = strength_value
-                else:
-                    scale = strength_value * (float(alpha_entry) / max(rank, 1))
-
-                low_rank = torch.matmul(shot_input, down_for_mul.transpose(0, 1))
-                contribution = torch.matmul(low_rank, up_for_mul.transpose(0, 1))
-                contribution = contribution * scale
+                contribution = torch.nn.functional.linear(shot_input, diff_weight, None)
+                contribution = contribution * strength_value
                 shot_delta = contribution if shot_delta is None else (shot_delta + contribution)
 
             if shot_delta is not None:
                 flat_output.index_add_(0, indices, shot_delta)
 
         return flat_output.view_as(output)
-
+    
 def remove_lora_from_module(module):
     for name, submodule in module.named_modules():
-        if isinstance(submodule, CustomLinear):
-            submodule.clear_shot_lora_cache()
         submodule.lora = None
 
 
@@ -242,7 +215,6 @@ def set_shot_lora_params(module, shot_payload, module_prefix=""):
         set_shot_lora_params(child, shot_payload, child_prefix)
 
     if isinstance(module, CustomLinear):
-        module.clear_shot_lora_cache()
         key = f"diffusion_model.{module_prefix}weight"
         shot_components = shot_payload.get(key)
         if shot_components is None and "_orig_mod." in key:
@@ -251,7 +223,5 @@ def set_shot_lora_params(module, shot_payload, module_prefix=""):
 
         if shot_components is None:
             module.shot_lora = []
-            module.shot_lora_key = key
         else:
             module.shot_lora = [components if components is not None else [] for components in shot_components]
-            module.shot_lora_key = key

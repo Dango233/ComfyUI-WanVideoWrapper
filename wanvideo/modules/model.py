@@ -2682,6 +2682,7 @@ class WanModel(torch.nn.Module):
                 CustomLinear.runtime_context = {
                     "token_labels": shot_token_labels.reshape(-1).to(device),
                     "current_step": current_step,
+                    "diff_cache": {},
                 }
 
             shot_latent_cuts = labels_to_cuts(shot_token_labels)
