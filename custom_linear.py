@@ -147,7 +147,6 @@ class CustomLinear(nn.Linear):
 
         device = flat_input.device
         dtype = flat_input.dtype
-        diff_cache = ctx.setdefault("diff_cache", {})
         current_step = ctx.get("current_step", 0)
 
         for shot_idx, components in enumerate(self.shot_lora):
@@ -174,32 +173,25 @@ class CustomLinear(nn.Linear):
                 if strength_value == 0.0:
                     continue
 
-                adapter = component.get("adapter")
-                if adapter is None:
-                    continue
+                weights_cache = component.setdefault("cache", {})
+                cache_key = (device, dtype)
+                cached_entry = weights_cache.get(cache_key)
+                if cached_entry is None:
+                    up_weight = component["up"].to(device=device, dtype=dtype)
+                    down_weight = component["down"].to(device=device, dtype=dtype)
+                    weights_cache[cache_key] = (up_weight, down_weight)
+                else:
+                    up_weight, down_weight = cached_entry
 
-                cache_key = (id(self), id(adapter))
-                diff_weight = diff_cache.get(cache_key)
-                if diff_weight is None or diff_weight.device != device or diff_weight.dtype != dtype:
-                    base_weight = weight.detach()
-                    calc_function = component.get("function")
-                    if calc_function is None:
-                        calc_function = lambda tensor: tensor
-                    diff_weight = adapter.calculate_weight(
-                        base_weight,
-                        "shot_lora",
-                        1.0,
-                        1.0,
-                        None,
-                        calc_function,
-                        intermediate_dtype=base_weight.dtype,
-                        original_weight=base_weight,
-                    ) - base_weight
-                    diff_weight = diff_weight.to(device=device, dtype=dtype)
-                    diff_cache[cache_key] = diff_weight
+                rank = down_weight.shape[0] if down_weight.dim() >= 2 else 1
+                alpha = component.get("alpha", 1.0)
+                scale = strength_value * (alpha / max(rank, 1))
 
-                contribution = torch.nn.functional.linear(shot_input, diff_weight, None)
-                contribution = contribution * strength_value
+                low_rank = torch.nn.functional.linear(shot_input, down_weight, None)
+                contribution = torch.nn.functional.linear(low_rank, up_weight, None)
+                del low_rank
+
+                contribution = contribution * scale
                 shot_delta = contribution if shot_delta is None else (shot_delta + contribution)
 
             if shot_delta is not None:
