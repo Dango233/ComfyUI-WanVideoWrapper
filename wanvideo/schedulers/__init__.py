@@ -6,7 +6,7 @@ from .flowmatch_pusa import FlowMatchSchedulerPusa
 from .flowmatch_res_multistep import FlowMatchSchedulerResMultistep
 from .scheduling_flow_match_lcm import FlowMatchLCMScheduler
 from .fm_sa_ode import FlowMatchSAODEStableScheduler
-from .fm_rcm import rCMFlowMatchScheduler, rCMRevisionFlowMatchScheduler
+from .fm_rcm import rCMFlowMatchScheduler
 from ...utils import log
 
 try:
@@ -29,8 +29,7 @@ scheduler_list = [
     "flowmatch_pusa",
     "multitalk",
     "sa_ode_stable",
-    "rcm",
-    "rcm_revision"
+    "rcm"
 ]
 
 def get_scheduler(scheduler, steps, start_step, end_step, shift, device, transformer_dim=5120, flowedit_args=None, denoise_strength=1.0, sigmas=None, log_timesteps=False, **kwargs):
@@ -121,9 +120,6 @@ def get_scheduler(scheduler, steps, start_step, end_step, shift, device, transfo
     elif "sa_ode_stable" in scheduler:
         sample_scheduler = FlowMatchSAODEStableScheduler(shift=shift, **kwargs)
         sample_scheduler.set_timesteps(steps, device=device, sigmas=sigmas[:-1].tolist() if sigmas is not None else None)
-    elif 'rcm_revision' in scheduler:
-        sample_scheduler = rCMRevisionFlowMatchScheduler()
-        sample_scheduler.set_timesteps(steps, sigma_max=120)
     elif 'rcm' in scheduler:
         sample_scheduler = rCMFlowMatchScheduler()
         sample_scheduler.set_timesteps(steps, sigma_max=120)
