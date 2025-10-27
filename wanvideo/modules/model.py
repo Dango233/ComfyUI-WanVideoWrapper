@@ -1,5 +1,6 @@
 # Copyright 2024-2025 The Alibaba Wan Team Authors. All rights reserved.
 import math
+import os
 import torch
 import torch.nn as nn
 from einops import repeat, rearrange
@@ -2679,10 +2680,13 @@ class WanModel(torch.nn.Module):
             shot_token_labels = shot_indices_tensor.repeat_interleave(spatial_tokens, dim=1)
 
             if getattr(self, "shot_lora_count", 0) > 0:
+                debug_env = os.environ.get("WAN_SHOT_LORA_DEBUG", "0")
+                debug_flag = debug_env.lower() in ("1", "true", "yes")
                 CustomLinear.runtime_context = {
                     "token_labels": shot_token_labels.reshape(-1).to(device),
                     "current_step": current_step,
                     "diff_cache": {},
+                    "debug_shot_lora": debug_flag,
                 }
 
             shot_latent_cuts = labels_to_cuts(shot_token_labels)
