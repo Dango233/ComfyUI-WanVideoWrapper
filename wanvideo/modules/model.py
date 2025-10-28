@@ -1753,6 +1753,9 @@ class WanModel(torch.nn.Module):
                 lynx_ref_layers=None,
                 # ovi
                 is_ovi_audio_model=False,
+                max_shots=0,
+                use_shot_embedding=False,
+                shot_embedding_init="zeros",
                 ):
         r"""
         Initialize the diffusion model backbone.
@@ -1815,6 +1818,16 @@ class WanModel(torch.nn.Module):
         self.vace_layers = vace_layers
         self.device = main_device
         self.patched_linear = False
+
+        if max_shots is None:
+            max_shots = 0
+        try:
+            self.max_shots = int(max(0, max_shots))
+        except (TypeError, ValueError):
+            self.max_shots = 0
+        self.shot_embedding_init = shot_embedding_init
+        self.use_shot_embedding = bool(use_shot_embedding and self.max_shots > 0)
+        self.shot_embedding = nn.Embedding(self.max_shots, self.dim) if self.use_shot_embedding else None
 
         self.blocks_to_swap = -1
         self.offload_txt_emb = False
@@ -2423,6 +2436,7 @@ class WanModel(torch.nn.Module):
         cross_attn_mask = None
         shot_latent_cuts = None
         spatial_tokens = None
+        shot_token_labels = None
 
         shot_positions = None
         if isinstance(text_cut_positions, list) and len(text_cut_positions) > 0:
@@ -2582,6 +2596,16 @@ class WanModel(torch.nn.Module):
             CustomLinear.runtime_context = None
 
         x = [u.flatten(2).transpose(1, 2) for u in x]
+        if self.shot_embedding is not None and shot_token_labels is not None:
+            embed_device = self.shot_embedding.weight.device
+            shot_ids = shot_token_labels.to(device=embed_device)
+            shot_embs = self.shot_embedding(shot_ids)
+            if shot_embs.device != x[0].device:
+                shot_embs = shot_embs.to(x[0].device)
+            if shot_embs.dtype != x[0].dtype:
+                shot_embs = shot_embs.to(x[0].dtype)
+            for batch_idx in range(len(x)):
+                x[batch_idx] = x[batch_idx] + shot_embs[batch_idx].unsqueeze(0)
         self.original_seq_len = x[0].shape[1]
         seq_lens = torch.tensor([u.size(1) for u in x], dtype=torch.int32)
         assert seq_lens.max() <= seq_len
@@ -2825,7 +2849,7 @@ class WanModel(torch.nn.Module):
             if self.offload_img_emb:
                 self.img_emb.to(self.offload_device, non_blocking=self.use_non_blocking)
 
-        if shot_attention_enabled and shot_block_config is not None and shot_positions is not None and context is not None and spatial_tokens is not None:
+        if shot_attention_enabled and shot_positions is not None and context is not None and spatial_tokens is not None:
             try:
                 context_length = context.shape[1]
                 cross_attn_mask = build_cross_attention_mask(
