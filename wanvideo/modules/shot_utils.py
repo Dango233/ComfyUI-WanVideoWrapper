@@ -284,6 +284,7 @@ def build_cross_attention_mask(
     num_heads: int = 1,
     block_value: float = -1e4,
     num_image_tokens: int = 0,
+    omit_transition: Optional[Sequence[bool]] = None,
 ) -> Optional[torch.Tensor]:
     if positions is None or positions.get("global") is None:
         return None
@@ -303,6 +304,10 @@ def build_cross_attention_mask(
     if len(shot_ranges) == 0 and shot_indices.numel() > 0 and shot_indices.max().item() > 0:
         return None
 
+    omit_flags: List[bool] = []
+    if omit_transition is not None:
+        omit_flags = [bool(flag) for flag in omit_transition]
+
     batch, latent_frames = shot_indices.shape
     vid_shot = shot_indices.repeat_interleave(spatial_tokens, dim=1)
 
@@ -310,26 +315,30 @@ def build_cross_attention_mask(
     g0_raw, g1_raw = positions["global"]
     g0 = max(0, min(text_context_length, int(g0_raw)))
     g1 = max(0, min(text_context_length, int(g1_raw)))
+    max_allowed = 0
     if text_context_length > 0:
-        end_inclusive = min(text_context_length, g1 + 1)
-        global_mask[g0:end_inclusive] = True
+        end_exclusive_global = min(text_context_length, g1 + 1)
+        global_mask[g0:end_exclusive_global] = True
+        max_allowed = max(max_allowed, end_exclusive_global)
 
     if len(shot_ranges) > 0:
         shot_table = torch.zeros(len(shot_ranges), text_context_length, dtype=torch.bool, device=device)
         for sid, (s0, s1) in enumerate(shot_ranges):
             s0 = max(0, min(text_context_length, int(s0)))
             s1 = max(0, min(text_context_length, int(s1)))
-            end_inclusive = min(text_context_length, s1 + 1)
-            shot_table[sid, s0:end_inclusive] = True
+            omit_flag = omit_flags[sid] if sid < len(omit_flags) else False
+            end_exclusive = min(text_context_length, s1 if omit_flag else s1 + 1)
+            end_exclusive = max(0, end_exclusive)
+            if end_exclusive > s0:
+                shot_table[sid, s0:end_exclusive] = True
+            max_allowed = max(max_allowed, end_exclusive)
         allow = shot_table[vid_shot]
         allow = allow | global_mask.view(1, 1, text_context_length)
     else:
         allow = global_mask.view(1, 1, text_context_length)
 
-    max_end_raw = max([positions["global"][1]] + [end for _, end in shot_ranges])
-    max_end = max(0, min(text_context_length, int(max_end_raw)))
     pad_mask = torch.zeros(text_context_length, dtype=torch.bool, device=device)
-    pad_start = min(text_context_length, max_end + 1)
+    pad_start = min(text_context_length, max_allowed)
     if pad_start < text_context_length:
         pad_mask[pad_start:] = True
     allow = allow | pad_mask.view(1, 1, text_context_length)

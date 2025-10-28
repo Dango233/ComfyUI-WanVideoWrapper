@@ -2461,6 +2461,9 @@ class WanModel(torch.nn.Module):
             shot_positions = text_cut_positions[0]
         elif isinstance(text_cut_positions, dict):
             shot_positions = text_cut_positions
+        omit_transition = None
+        if isinstance(shot_positions, dict):
+            omit_transition = shot_positions.get("omit")
         if shot_attention_enabled and (not shot_positions or shot_positions.get("global") is None):
             raise ValueError("Shot attention is enabled but structured prompt positions are missing. Ensure the prompt includes [global caption]/[per shot caption]/[shot cut] tags.")
 
@@ -2899,6 +2902,7 @@ class WanModel(torch.nn.Module):
                     device=x[0].device,
                     dtype=x[0].dtype,
                     num_image_tokens=clip_token_count,
+                    omit_transition=omit_transition,
                 )
             except Exception as exc:
                 raise ValueError(f"Failed to build cross-attention mask for shot attention: {exc}") from exc

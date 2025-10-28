@@ -212,6 +212,7 @@ class WanVideoHolocineShotBuilder:
             "optional": {
                 "shot_list": ("WANVID_HOLOCINE_SHOT_LIST",),
                 "shot_lora": ("WANVIDLORA", {"default": None, "tooltip": "可选：为当前镜头附加的 LoRA 列表，会在采样时按镜头聚合。"}),
+                "omit_cut_to_next_shot": ("BOOLEAN", {"default": False, "tooltip": "若勾选，则在该镜头与下一镜头之间弱化 [shot cut] 提示，用于柔化过渡。"}),
             }
         }
 
@@ -221,7 +222,7 @@ class WanVideoHolocineShotBuilder:
     CATEGORY = "WanVideoWrapper/Holocine"
     DESCRIPTION = "Build a Holocine-style structured shot list by chaining this node."
 
-    def process(self, shot_caption, shot_list=None, shot_lora=None):
+    def process(self, shot_caption, shot_list=None, shot_lora=None, omit_cut_to_next_shot=False):
         caption = shot_caption.strip()
         if not caption:
             raise ValueError("Shot caption cannot be empty.")
@@ -234,6 +235,8 @@ class WanVideoHolocineShotBuilder:
         }
         if shot_lora is not None:
             shot_info["lora"] = list(shot_lora)
+        if omit_cut_to_next_shot:
+            shot_info["omit_cut_to_next_shot"] = True
         shots.append(shot_info)
         return (shots,)
 
@@ -306,16 +309,20 @@ class WanVideoHolocinePromptEncode:
 
         shots = sorted([dict(item) for item in shot_list], key=lambda s: s.get("index", 0))
         shot_lora_config: list[list[dict]] = []
-        for shot in shots:
+        omit_cut_flags: list[bool] = []
+        shot_count = len(shots)
+        for idx, shot in enumerate(shots):
             loras_raw = shot.get("lora")
             if not loras_raw:
                 shot_lora_config.append([])
-                continue
-            normalized_loras = []
-            for entry in loras_raw:
-                if isinstance(entry, dict):
-                    normalized_loras.append(dict(entry))
-            shot_lora_config.append(normalized_loras)
+            else:
+                normalized_loras = []
+                for entry in loras_raw:
+                    if isinstance(entry, dict):
+                        normalized_loras.append(dict(entry))
+                shot_lora_config.append(normalized_loras)
+            omit_flag = bool(shot.get("omit_cut_to_next_shot")) and idx < (shot_count - 1)
+            omit_cut_flags.append(omit_flag)
 
         inferred_frames = None
         if isinstance(image_embeds, dict):
@@ -377,6 +384,7 @@ class WanVideoHolocinePromptEncode:
             "total_frames": total_frames,
             "shot_cut_frames": shot_cuts,
             "shot_loras": shot_lora_config,
+            "omit_cut_flags": omit_cut_flags,
         }
 
         return text_embeds, holocine_args, positive_prompt
@@ -703,6 +711,11 @@ class WanVideoTextEncode:
                 shot_positions.append(positions)
         else:
             shot_positions = [None for _ in positive_prompts]
+
+        if omit_cut_flags:
+            for positions in shot_positions:
+                if isinstance(positions, dict):
+                    positions["omit"] = list(omit_cut_flags)
 
         prompt_embeds_dict = {
             "prompt_embeds": context,
