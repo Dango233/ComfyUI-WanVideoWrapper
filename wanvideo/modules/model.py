@@ -2329,7 +2329,7 @@ class WanModel(torch.nn.Module):
                 block.self_attn.mask_map = MaskMap(video_token_num=seq_len, num_frame=F+1)
 
         if self.ref_conv is not None and fun_ref is not None:
-            fun_ref = self.ref_conv(fun_ref).flatten(2).transpose(1, 2)
+            fun_ref = self.ref_conv(fun_ref.to(self.ref_conv.weight.dtype)).flatten(2).transpose(1, 2)
             grid_sizes = torch.stack([torch.tensor([u[0] + 1, u[1], u[2]]) for u in grid_sizes]).to(grid_sizes.device)
             seq_len += fun_ref.size(1)
             F += 1
