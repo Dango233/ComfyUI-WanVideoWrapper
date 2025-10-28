@@ -1630,9 +1630,15 @@ class WanVideoSampler:
 
                         positions_backup = None
                         smooth_backup = None
+                        shot_cfg_backup = None
+                        shot_indices_backup = None
                         if shot_attention_cfg:
                             positions_backup = base_params.get('text_cut_positions')
                             smooth_backup = base_params.get('smooth_windows')
+                            shot_cfg_backup = base_params.get('shot_attention_cfg')
+                            shot_indices_backup = base_params.get('shot_indices')
+                            base_params['shot_attention_cfg'] = None
+                            base_params['shot_indices'] = None
                             base_params['text_cut_positions'] = None
                             base_params['smooth_windows'] = None
                         try:
@@ -1737,6 +1743,8 @@ class WanVideoSampler:
                                 return noise_pred, None, [cache_state_cond, cache_state_uncond, cache_state_lynx]
                         finally:
                             if shot_attention_cfg:
+                                base_params['shot_attention_cfg'] = shot_cfg_backup
+                                base_params['shot_indices'] = shot_indices_backup
                                 base_params['text_cut_positions'] = positions_backup
                                 base_params['smooth_windows'] = smooth_backup
                             base_params['is_uncond'] = False
