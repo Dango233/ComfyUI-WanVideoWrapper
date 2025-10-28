@@ -219,6 +219,10 @@ class WanVideoHolocineShotBuilder:
                     "step": 1,
                     "tooltip": "共享给下一镜头的 token 数（0 表示关闭，常见范围 1-12）。"
                 }),
+                "clip_embeds": ("WANVIDIMAGE_CLIPEMBEDS", {
+                    "default": None,
+                    "tooltip": "可选：为当前镜头附加的 CLIP 视觉特征，生成时会按镜头顺序堆叠。"
+                }),
             }
         }
 
@@ -228,7 +232,7 @@ class WanVideoHolocineShotBuilder:
     CATEGORY = "WanVideoWrapper/Holocine"
     DESCRIPTION = "Build a Holocine-style structured shot list by chaining this node."
 
-    def process(self, shot_caption, shot_list=None, shot_lora=None, smooth_window=0):
+    def process(self, shot_caption, shot_list=None, shot_lora=None, smooth_window=0, clip_embeds=None):
         caption = shot_caption.strip()
         if not caption:
             raise ValueError("Shot caption cannot be empty.")
@@ -247,6 +251,18 @@ class WanVideoHolocineShotBuilder:
             smooth_value = 0
         smooth_value = max(0, smooth_value)
         shot_info["smooth_window"] = smooth_value
+
+        if clip_embeds is not None:
+            if not isinstance(clip_embeds, dict):
+                raise ValueError("clip_embeds 必须是 WanVideoClipVisionEncode 的输出字典。")
+            clip_entry = {}
+            if clip_embeds.get("clip_embeds") is not None:
+                clip_entry["clip_embeds"] = clip_embeds["clip_embeds"]
+            if clip_embeds.get("negative_clip_embeds") is not None:
+                clip_entry["negative_clip_embeds"] = clip_embeds["negative_clip_embeds"]
+            if clip_entry:
+                shot_info["clip_embeds"] = clip_entry
+
         shots.append(shot_info)
         return (shots,)
 
@@ -318,9 +334,27 @@ class WanVideoHolocinePromptEncode:
             raise ValueError("At least one shot is required. Please chain WanVideoHolocineShotBuilder nodes first.")
 
         shots = sorted([dict(item) for item in shot_list], key=lambda s: s.get("index", 0))
+
+        def _prepare_clip_tensor(tensor, shot_idx, key):
+            if not torch.is_tensor(tensor):
+                raise ValueError(f"Shot {shot_idx} 的 {key} 必须是 torch.Tensor。")
+            if tensor.ndim == 3:
+                if tensor.shape[0] != 1:
+                    raise ValueError(f"Shot {shot_idx} 的 {key} 期望批大小为 1，收到 {tensor.shape[0]}。")
+                tensor = tensor[0]
+            elif tensor.ndim != 2:
+                raise ValueError(f"Shot {shot_idx} 的 {key} 形状 {tensor.shape} 无法堆叠，请确保维度为 [tokens, dim]。")
+            return tensor
+
+        clip_batches = []
+        clip_neg_batches = []
+        clip_can_stack = True
+        neg_can_stack = True
+        clip_ref_shape = None
+
         shot_lora_config: list[list[dict]] = []
         smooth_windows: list[int] = []
-        for shot in shots:
+        for position, shot in enumerate(shots):
             normalized_loras = []
             loras_raw = shot.get("lora")
             if loras_raw:
@@ -335,6 +369,61 @@ class WanVideoHolocinePromptEncode:
                 window_int = 0
             window_int = max(0, window_int)
             smooth_windows.append(window_int)
+
+            if clip_can_stack:
+                clip_entry = shot.get("clip_embeds")
+                if clip_entry is None or clip_entry.get("clip_embeds") is None:
+                    if clip_batches:
+                        log.warning(
+                            "Holocine per-shot CLIP stacking disabled: shot %s 缺少 clip_embeds。",
+                            shot.get("index", position),
+                        )
+                    clip_can_stack = False
+                    clip_batches.clear()
+                    clip_neg_batches.clear()
+                else:
+                    clip_tensor = _prepare_clip_tensor(
+                        clip_entry.get("clip_embeds"),
+                        shot.get("index", position),
+                        "clip_embeds",
+                    )
+                    if clip_ref_shape is None:
+                        clip_ref_shape = clip_tensor.shape
+                    elif clip_tensor.shape != clip_ref_shape:
+                        raise ValueError(
+                            f"Shot {shot.get('index', position)} 的 clip_embeds 形状 {clip_tensor.shape} 与首个镜头 {clip_ref_shape} 不一致。"
+                        )
+                    clip_batches.append(clip_tensor)
+
+                    if neg_can_stack:
+                        neg_tensor = clip_entry.get("negative_clip_embeds")
+                        if neg_tensor is None:
+                            neg_can_stack = False
+                            clip_neg_batches.clear()
+                        else:
+                            neg_tensor = _prepare_clip_tensor(
+                                neg_tensor,
+                                shot.get("index", position),
+                                "negative_clip_embeds",
+                            )
+                            if neg_tensor.shape != clip_ref_shape:
+                                raise ValueError(
+                                    f"Shot {shot.get('index', position)} 的 negative_clip_embeds 形状 {neg_tensor.shape} 与 clip_embeds 不一致。"
+                                )
+                            clip_neg_batches.append(neg_tensor)
+
+        shot_clip_context = None
+        shot_clip_context_neg = None
+        if clip_can_stack and clip_batches:
+            try:
+                shot_clip_context = torch.stack(clip_batches, dim=0)
+            except RuntimeError as exc:
+                raise ValueError(f"无法堆叠镜头 CLIP 特征: {exc}") from exc
+            if neg_can_stack and len(clip_neg_batches) == len(shots) and clip_neg_batches:
+                try:
+                    shot_clip_context_neg = torch.stack(clip_neg_batches, dim=0)
+                except RuntimeError as exc:
+                    raise ValueError(f"无法堆叠镜头负向 CLIP 特征: {exc}") from exc
 
         inferred_frames = None
         if isinstance(image_embeds, dict):
@@ -398,6 +487,11 @@ class WanVideoHolocinePromptEncode:
             "shot_loras": shot_lora_config,
             "smooth_windows": smooth_windows,
         }
+
+        if shot_clip_context is not None:
+            holocine_args["shot_clip_context"] = shot_clip_context
+            if shot_clip_context_neg is not None:
+                holocine_args["shot_clip_context_neg"] = shot_clip_context_neg
 
         return text_embeds, holocine_args, positive_prompt
 

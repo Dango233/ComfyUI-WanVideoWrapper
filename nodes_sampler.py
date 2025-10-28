@@ -642,12 +642,21 @@ class WanVideoSampler:
             phantom_end_percent = image_embeds.get("phantom_end_percent", 1.0)
 
         # CLIP image features
-        clip_fea = image_embeds.get("clip_context", None)
-        if clip_fea is not None:
-            clip_fea = clip_fea.to(dtype)
-        clip_fea_neg = image_embeds.get("negative_clip_context", None)
-        if clip_fea_neg is not None:
-            clip_fea_neg = clip_fea_neg.to(dtype)
+        shot_clip_override = holocine_args.get("shot_clip_context") if args_present else None
+        if shot_clip_override is not None:
+            clip_fea = shot_clip_override.to(device=device, dtype=dtype)
+        else:
+            clip_fea = image_embeds.get("clip_context", None)
+            if clip_fea is not None:
+                clip_fea = clip_fea.to(dtype)
+
+        shot_clip_override_neg = holocine_args.get("shot_clip_context_neg") if args_present else None
+        if shot_clip_override_neg is not None:
+            clip_fea_neg = shot_clip_override_neg.to(device=device, dtype=dtype)
+        else:
+            clip_fea_neg = image_embeds.get("negative_clip_context", None)
+            if clip_fea_neg is not None:
+                clip_fea_neg = clip_fea_neg.to(dtype)
 
         num_frames = image_embeds.get("num_frames", 0)
 
