@@ -495,12 +495,18 @@ class WanSelfAttention(nn.Module):
             indices = shot_config.get("indices")
             per_g = shot_config.get("global_tokens", 0)
             mode = shot_config.get("mode", "firstk")
-            backend = (shot_config.get("backend") or "auto") if shot_config else "auto"
+            backend = (shot_config.get("backend") or "full") if shot_config else "full"
             backend = backend.lower()
+            backend = {
+                "sparse_flash": "sparse_flash_attn",
+                "flash": "sparse_flash_attn",
+                "sparse": "sparse_fallback",
+                "dense": "full",
+            }.get(backend, backend)
             prefix_tokens = int(shot_config.get("prefix_tokens", 0) or 0)
             if backend == "full":
                 use_shot_attention = False
-            elif indices is not None and (per_g > 0 or prefix_tokens > 0):
+            elif backend in {"sparse_flash_attn", "sparse_fallback"} and indices is not None and (per_g > 0 or prefix_tokens > 0):
                 x = sparse_shot_attention(
                     q,
                     k,
@@ -514,6 +520,8 @@ class WanSelfAttention(nn.Module):
                     prefix_tokens=prefix_tokens,
                 )
                 use_shot_attention = True
+            else:
+                raise ValueError(f"Unsupported shot attention backend '{backend}'.")
 
         if not use_shot_attention:
             x = attention(q, k, v, k_lens=seq_lens, attention_mode=attention_mode)
@@ -1753,6 +1761,9 @@ class WanModel(torch.nn.Module):
                 lynx_ref_layers=None,
                 # ovi
                 is_ovi_audio_model=False,
+                max_shots=0,
+                use_shot_embedding=False,
+                shot_embedding_init="zeros",
                 ):
         r"""
         Initialize the diffusion model backbone.
@@ -1815,6 +1826,19 @@ class WanModel(torch.nn.Module):
         self.vace_layers = vace_layers
         self.device = main_device
         self.patched_linear = False
+        self._shot_embedding_warned_missing = False
+        self._shot_embedding_notified_present = False
+        self._shot_mask_channel_warned = False
+
+        if max_shots is None:
+            max_shots = 0
+        try:
+            self.max_shots = int(max(0, max_shots))
+        except (TypeError, ValueError):
+            self.max_shots = 0
+        self.shot_embedding_init = shot_embedding_init
+        self.use_shot_embedding = bool(use_shot_embedding and self.max_shots > 0)
+        self.shot_embedding = nn.Embedding(self.max_shots, self.dim) if self.use_shot_embedding else None
 
         self.blocks_to_swap = -1
         self.offload_txt_emb = False
@@ -2383,29 +2407,36 @@ class WanModel(torch.nn.Module):
         device = self.main_device
 
         shot_attention_enabled = bool(shot_attention_cfg and shot_attention_cfg.get("enabled", False))
-        shot_backend = (shot_attention_cfg.get("backend", "auto") if shot_attention_enabled else "auto").lower()
+        shot_backend = (shot_attention_cfg.get("backend", "full") if shot_attention_enabled else "full").lower()
         token_mode = None
         token_ratio = None
         token_absolute = None
         if shot_attention_enabled:
+            valid_backends = {"full", "sparse_fallback", "sparse_flash_attn"}
+            backend_aliases = {"sparse_flash": "sparse_flash_attn", "flash": "sparse_flash_attn", "sparse": "sparse_fallback", "dense": "full"}
+            shot_backend = backend_aliases.get(shot_backend, shot_backend)
+            if shot_backend not in valid_backends:
+                raise ValueError(f"Unsupported shot attention backend '{shot_backend}'. Expected one of {sorted(valid_backends)}.")
             raw_token_value = shot_attention_cfg.get("global_token_ratio_or_number", 1.0)
             if not isinstance(raw_token_value, (int, float)):
                 raise ValueError(f"Shot attention expected a numeric global_token_ratio_or_number value, got {type(raw_token_value).__name__} instead.")
             raw_token_value = float(raw_token_value)
             if raw_token_value <= 0.0:
                 raise ValueError("Shot attention requires global_token_ratio_or_number to be > 0.")
-            if raw_token_value <= 1.0:
+            if shot_backend != "full" and raw_token_value <= 1.0:
                 token_mode = "ratio"
                 token_ratio = raw_token_value
-            else:
+            elif shot_backend != "full":
                 if abs(raw_token_value - round(raw_token_value)) > 1e-6 or raw_token_value < 64:
                     raise ValueError("Shot attention numeric mode expects an integer ≥ 64 when global_token_ratio_or_number > 1.")
                 token_mode = "absolute"
                 token_absolute = int(round(raw_token_value))
+            else:
+                token_mode = None
+                token_ratio = None
+                token_absolute = None
         shot_mode = shot_attention_cfg.get("mode", "firstk") if shot_attention_enabled else "firstk"
         if shot_attention_enabled:
-            if shot_backend != "full" and token_mode is None:
-                raise ValueError("Shot attention requires global_token_ratio_or_number to be set (ratio ≤ 1.0 or integer ≥ 64).")
             if shot_indices is None:
                 raise ValueError("Shot attention is enabled but shot_indices are missing. Ensure WanVideoHolocineShotArgs/Holocine Prompt nodes are connected.")
             if isinstance(shot_indices, torch.Tensor):
@@ -2423,6 +2454,7 @@ class WanModel(torch.nn.Module):
         cross_attn_mask = None
         shot_latent_cuts = None
         spatial_tokens = None
+        shot_token_labels = None
 
         shot_positions = None
         if isinstance(text_cut_positions, list) and len(text_cut_positions) > 0:
@@ -2455,14 +2487,26 @@ class WanModel(torch.nn.Module):
 
         # patch embed
         # Append shot mask feature (Holocine-style) when available and supported
-        mask_mode = (shot_mask_type or "id").lower()
-        valid_mask_modes = {"id", "normalized", "alternating"}
+        mask_mode = (shot_mask_type or "none").lower()
+        valid_mask_modes = {"none", "id", "normalized", "alternating"}
         if mask_mode not in valid_mask_modes:
             raise ValueError(f"Shot mask mode '{mask_mode}' is not supported. Expected one of {sorted(valid_mask_modes)}.")
 
-        if shot_indices_tensor is not None and isinstance(x, (list, tuple)) and len(x) > 0:
+        if isinstance(x, (list, tuple)) and len(x) > 0:
             sample_channels = x[0].shape[0]
             expected_in_channels = self.original_patch_embedding.weight.shape[1]
+            if mask_mode == "none" and expected_in_channels == sample_channels + 1:
+                raise ValueError(
+                    "Loaded checkpoint expects an additional shot mask channel (input channels=%d, current=%d). "
+                    "Enable mask_type (e.g. 'id') or load weights trained without the extra channel."
+                    % (expected_in_channels, sample_channels)
+                )
+        if (
+            shot_indices_tensor is not None
+            and isinstance(x, (list, tuple))
+            and len(x) > 0
+            and mask_mode != "none"
+        ):
             if expected_in_channels == sample_channels + 1:
                 mask_values = None
                 num_shots = int(shot_indices_tensor.max().item()) + 1 if shot_indices_tensor.numel() > 0 else 0
@@ -2484,11 +2528,10 @@ class WanModel(torch.nn.Module):
                     mask_expanded = mask_values.view(batch_count, 1, latent_frames, 1, 1).expand(batch_count, 1, latent_frames, height, width)
                     x = [torch.cat([latent, mask_expanded[i]], dim=0) if i < batch_count else latent for i, latent in enumerate(x)]
             else:
-                log.debug(
-                    "Shot mask requested with mode '%s' but patch embedding expects %d channels (current %d). Skipping mask feature.",
-                    mask_mode,
-                    expected_in_channels,
-                    sample_channels,
+                raise ValueError(
+                    "Shot mask mode '%s' requires patch embedding to accept an extra channel (expected %d, got %d). "
+                    "Set mask_type='none' or use checkpoints trained with the additional mask channel."
+                    % (mask_mode, expected_in_channels, sample_channels)
                 )
 
         if control_lora_enabled:
@@ -2560,25 +2603,48 @@ class WanModel(torch.nn.Module):
             elif token_mode == "absolute":
                 pooled_tokens = token_absolute
             else:
-                pooled_tokens = spatial_tokens  # fallback when backend == "full"
+                pooled_tokens = spatial_tokens  # unused by sparse backends but keeps structure
             pooled_tokens = max(1, min(spatial_tokens, pooled_tokens))
-            shot_block_config = {
-                "indices": shot_latent_cuts,
-                "global_tokens": pooled_tokens,
-                "mode": shot_mode,
-                "backend": shot_backend,
-                "prefix_tokens": prefix_tokens,
-            }
-            if token_mode is not None:
-                shot_block_config["token_mode"] = token_mode
-                if token_mode == "ratio":
-                    shot_block_config["token_ratio"] = token_ratio
-                else:
-                    shot_block_config["token_absolute"] = token_absolute
+            if shot_backend == "full":
+                shot_block_config = None
+            else:
+                shot_block_config = {
+                    "indices": shot_latent_cuts,
+                    "global_tokens": pooled_tokens,
+                    "mode": shot_mode,
+                    "backend": shot_backend,
+                    "prefix_tokens": prefix_tokens,
+                }
+                if token_mode is not None:
+                    shot_block_config["token_mode"] = token_mode
+                    if token_mode == "ratio":
+                        shot_block_config["token_ratio"] = token_ratio
+                    else:
+                        shot_block_config["token_absolute"] = token_absolute
         else:
             CustomLinear.runtime_context = None
 
+        if shot_attention_enabled:
+            if self.shot_embedding is None:
+                if not self._shot_embedding_warned_missing:
+                    log.info("Shot attention enabled: running without shot embedding.")
+                    self._shot_embedding_warned_missing = True
+            else:
+                if not self._shot_embedding_notified_present:
+                    log.info(f"Shot attention enabled: running with shot embedding (max_shots={self.shot_embedding.num_embeddings}).")
+                    self._shot_embedding_notified_present = True
+
         x = [u.flatten(2).transpose(1, 2) for u in x]
+        if self.shot_embedding is not None and shot_token_labels is not None:
+            embed_device = self.shot_embedding.weight.device
+            shot_ids = shot_token_labels.to(device=embed_device)
+            shot_embs = self.shot_embedding(shot_ids)
+            if shot_embs.device != x[0].device:
+                shot_embs = shot_embs.to(x[0].device)
+            if shot_embs.dtype != x[0].dtype:
+                shot_embs = shot_embs.to(x[0].dtype)
+            for batch_idx in range(len(x)):
+                x[batch_idx] = x[batch_idx] + shot_embs[batch_idx].unsqueeze(0)
         self.original_seq_len = x[0].shape[1]
         seq_lens = torch.tensor([u.size(1) for u in x], dtype=torch.int32)
         assert seq_lens.max() <= seq_len
@@ -2822,7 +2888,7 @@ class WanModel(torch.nn.Module):
             if self.offload_img_emb:
                 self.img_emb.to(self.offload_device, non_blocking=self.use_non_blocking)
 
-        if shot_attention_enabled and shot_block_config is not None and shot_positions is not None and context is not None and spatial_tokens is not None:
+        if shot_attention_enabled and shot_positions is not None and context is not None and spatial_tokens is not None:
             try:
                 context_length = context.shape[1]
                 cross_attn_mask = build_cross_attention_mask(

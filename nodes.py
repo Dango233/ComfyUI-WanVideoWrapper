@@ -398,13 +398,13 @@ class WanVideoHolocineSetShotAttention:
                 }),
             },
             "optional": {
-                "mask_type": (["id", "normalized", "alternating"], {
-                    "default": "id",
-                    "tooltip": "Shot mask variant: raw IDs, normalized IDs, or alternating parity. Matches HoloCine defaults."
+                "mask_type": (["none", "id", "normalized", "alternating"], {
+                    "default": "none",
+                    "tooltip": "Shot mask variant. Use 'none' (default) to disable, or select a mask style to add per-shot features."
                 }),
-                "backend": (["auto", "sparse_flash_attn", "sparse_fallback", "full"], {
-                    "default": "auto",
-                    "tooltip": "Select sparse FlashAttention backend or PyTorch fallback; full disables sparse sampling."
+                "backend": (["full", "sparse_fallback", "sparse_flash_attn"], {
+                    "default": "full",
+                    "tooltip": "Select shot attention backend: full (dense), sparse_fallback (simulated sparse), or sparse_flash_attn (FlashAttention varlen)."
                 }),
                 "i2v_mode": ("BOOLEAN", {"default": False, "tooltip": "Treat the first latent slice as a global anchor (manual I2V mode)."}),
             }
@@ -415,7 +415,7 @@ class WanVideoHolocineSetShotAttention:
     FUNCTION = "apply"
     CATEGORY = "WanVideoWrapper/Holocine"
 
-    def apply(self, model, enable, global_token_ratio_or_number, mask_type="id", backend="auto", i2v_mode=False):
+    def apply(self, model, enable, global_token_ratio_or_number, mask_type="none", backend="full", i2v_mode=False):
         value = float(global_token_ratio_or_number)
         if value <= 0.0:
             raise ValueError("global_token_ratio_or_number must be > 0. Use values ≤ 1.0 for ratios or integers ≥ 64 for absolute counts.")

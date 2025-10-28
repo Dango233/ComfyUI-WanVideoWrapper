@@ -307,29 +307,31 @@ def build_cross_attention_mask(
     vid_shot = shot_indices.repeat_interleave(spatial_tokens, dim=1)
 
     global_mask = torch.zeros(text_context_length, dtype=torch.bool, device=device)
-    g0, g1 = positions["global"]
-    g0 = max(0, min(text_context_length, g0))
-    g1 = max(0, min(text_context_length, g1))
-    if g0 < g1:
-        global_mask[g0:g1] = True
+    g0_raw, g1_raw = positions["global"]
+    g0 = max(0, min(text_context_length, int(g0_raw)))
+    g1 = max(0, min(text_context_length, int(g1_raw)))
+    if text_context_length > 0:
+        end_inclusive = min(text_context_length, g1 + 1)
+        global_mask[g0:end_inclusive] = True
 
     if len(shot_ranges) > 0:
         shot_table = torch.zeros(len(shot_ranges), text_context_length, dtype=torch.bool, device=device)
         for sid, (s0, s1) in enumerate(shot_ranges):
-            s0 = max(0, min(text_context_length, s0))
-            s1 = max(0, min(text_context_length, s1))
-            if s0 < s1:
-                shot_table[sid, s0:s1] = True
+            s0 = max(0, min(text_context_length, int(s0)))
+            s1 = max(0, min(text_context_length, int(s1)))
+            end_inclusive = min(text_context_length, s1 + 1)
+            shot_table[sid, s0:end_inclusive] = True
         allow = shot_table[vid_shot]
         allow = allow | global_mask.view(1, 1, text_context_length)
     else:
         allow = global_mask.view(1, 1, text_context_length)
 
-    max_end = max([positions["global"][1]] + [end for _, end in shot_ranges])
-    max_end = max(0, min(text_context_length, max_end))
+    max_end_raw = max([positions["global"][1]] + [end for _, end in shot_ranges])
+    max_end = max(0, min(text_context_length, int(max_end_raw)))
     pad_mask = torch.zeros(text_context_length, dtype=torch.bool, device=device)
-    if max_end < text_context_length:
-        pad_mask[max_end:] = True
+    pad_start = min(text_context_length, max_end + 1)
+    if pad_start < text_context_length:
+        pad_mask[pad_start:] = True
     allow = allow | pad_mask.view(1, 1, text_context_length)
 
     bias = torch.zeros(batch, latent_frames * spatial_tokens, text_context_length, dtype=dtype, device=device)
