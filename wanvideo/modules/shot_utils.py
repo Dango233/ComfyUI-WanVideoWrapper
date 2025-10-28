@@ -327,8 +327,11 @@ def build_cross_attention_mask(
             s0 = max(0, min(text_context_length, int(s0)))
             s1 = max(0, min(text_context_length, int(s1)))
             omit_flag = omit_flags[sid] if sid < len(omit_flags) else False
-            end_exclusive = min(text_context_length, s1 if omit_flag else s1 + 1)
-            end_exclusive = max(0, end_exclusive)
+            if omit_flag:
+                end_exclusive = max(s0, s1 - 1)
+            else:
+                end_exclusive = min(text_context_length, s1)
+            end_exclusive = max(0, min(text_context_length, end_exclusive))
             if end_exclusive > s0:
                 shot_table[sid, s0:end_exclusive] = True
             max_allowed = max(max_allowed, end_exclusive)
