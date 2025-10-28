@@ -712,11 +712,6 @@ class WanVideoTextEncode:
         else:
             shot_positions = [None for _ in positive_prompts]
 
-        if omit_cut_flags:
-            for positions in shot_positions:
-                if isinstance(positions, dict):
-                    positions["omit"] = list(omit_cut_flags)
-
         prompt_embeds_dict = {
             "prompt_embeds": context,
             "negative_prompt_embeds": context_null,
