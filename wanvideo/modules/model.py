@@ -1828,6 +1828,7 @@ class WanModel(torch.nn.Module):
         self.patched_linear = False
         self._shot_embedding_warned_missing = False
         self._shot_embedding_notified_present = False
+        self._shot_mask_channel_warned = False
 
         if max_shots is None:
             max_shots = 0
@@ -2520,11 +2521,10 @@ class WanModel(torch.nn.Module):
                     mask_expanded = mask_values.view(batch_count, 1, latent_frames, 1, 1).expand(batch_count, 1, latent_frames, height, width)
                     x = [torch.cat([latent, mask_expanded[i]], dim=0) if i < batch_count else latent for i, latent in enumerate(x)]
             else:
-                log.debug(
-                    "Shot mask requested with mode '%s' but patch embedding expects %d channels (current %d). Skipping mask feature.",
-                    mask_mode,
-                    expected_in_channels,
-                    sample_channels,
+                raise ValueError(
+                    "Shot mask mode '%s' requires patch embedding to accept an extra channel (expected %d, got %d). "
+                    "Set mask_type='none' or use checkpoints trained with the additional mask channel."
+                    % (mask_mode, expected_in_channels, sample_channels)
                 )
 
         if control_lora_enabled:
