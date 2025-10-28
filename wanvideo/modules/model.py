@@ -13,7 +13,7 @@ except:
     pass
 
 from .attention import attention, sparse_shot_attention
-from .shot_utils import build_cross_attention_mask, build_shot_indices, labels_to_cuts
+from .shot_utils import build_cross_attention_mask, build_shot_indices, labels_to_cuts, normalize_smooth_windows
 import numpy as np
 from tqdm import tqdm
 import gc
@@ -518,6 +518,7 @@ class WanSelfAttention(nn.Module):
                     backend=backend,
                     attention_mode=attention_mode,
                     prefix_tokens=prefix_tokens,
+                    smooth_windows=shot_config.get("smooth_windows"),
                 )
                 use_shot_attention = True
             else:
@@ -2408,6 +2409,7 @@ class WanModel(torch.nn.Module):
         device = self.main_device
 
         shot_attention_enabled = bool(shot_attention_cfg and shot_attention_cfg.get("enabled", False))
+        smooth_windows = normalize_smooth_windows(smooth_windows)
         shot_backend = (shot_attention_cfg.get("backend", "full") if shot_attention_enabled else "full").lower()
         token_mode = None
         token_ratio = None
@@ -2616,6 +2618,8 @@ class WanModel(torch.nn.Module):
                     "backend": shot_backend,
                     "prefix_tokens": prefix_tokens,
                 }
+                if smooth_windows is not None:
+                    shot_block_config["smooth_windows"] = smooth_windows
                 if token_mode is not None:
                     shot_block_config["token_mode"] = token_mode
                     if token_mode == "ratio":

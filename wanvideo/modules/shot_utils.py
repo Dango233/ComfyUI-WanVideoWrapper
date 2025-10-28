@@ -14,6 +14,27 @@ LATENT_FRAME_STRIDE = 4
 SMOOTH_WINDOW_TOKENS = 12
 
 
+def normalize_smooth_windows(smooth_windows: Optional[Sequence[Any]]) -> Optional[List[int]]:
+    """Sanitize smooth window specifications into a list of non-negative ints."""
+
+    if smooth_windows is None:
+        return None
+
+    collected: List[int] = []
+    for value in smooth_windows:
+        if isinstance(value, bool):
+            collected.append(SMOOTH_WINDOW_TOKENS if value else 0)
+        else:
+            try:
+                collected.append(max(0, int(value)))
+            except Exception:
+                collected.append(0)
+
+    if any(v > 0 for v in collected):
+        return collected
+    return None
+
+
 def enforce_4t_plus_1(n: int) -> int:
     """Clamp frame counts to the closest 4t+1 form used by Wan latents."""
     t = round((n - 1) / LATENT_FRAME_STRIDE)
@@ -305,19 +326,7 @@ def build_cross_attention_mask(
     if len(shot_ranges) == 0 and shot_indices.numel() > 0 and shot_indices.max().item() > 0:
         return None
 
-    smooth_values: Optional[List[int]] = None
-    if smooth_windows is not None:
-        collected: List[int] = []
-        for value in smooth_windows:
-            if isinstance(value, bool):
-                collected.append(SMOOTH_WINDOW_TOKENS if value else 0)
-                continue
-            try:
-                collected.append(max(0, int(value)))
-            except Exception:
-                collected.append(0)
-        if any(v > 0 for v in collected):
-            smooth_values = collected
+    smooth_values = normalize_smooth_windows(smooth_windows)
 
     batch, latent_frames = shot_indices.shape
     vid_shot = shot_indices.repeat_interleave(spatial_tokens, dim=1)

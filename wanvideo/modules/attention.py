@@ -1,10 +1,11 @@
 # Copyright 2024-2025 The Alibaba Wan Team Authors. All rights reserved.
 import torch
-from typing import List, Sequence
+from typing import List, Optional, Sequence
 
 from einops import rearrange
 
 from ...utils import log
+from .shot_utils import normalize_smooth_windows
 
 
 _VARLEN_FALLBACK_WARNED = False
@@ -327,10 +328,13 @@ def sparse_shot_attention(
     backend: str = "auto",
     attention_mode: str = "sdpa",
     prefix_tokens: int = 0,
+    smooth_windows: Optional[Sequence[int]] = None,
 ):
     """Shot-aware attention with optional varlen flash kernels or dense fallback."""
     if q.shape != k.shape or q.shape != v.shape:
         raise ValueError("q, k, v must share the same shape")
+
+    smooth_values = normalize_smooth_windows(smooth_windows)
 
     backend = (backend or "sparse_fallback").lower()
     backend = {
@@ -366,6 +370,7 @@ def sparse_shot_attention(
             causal=causal,
             attention_mode=attn_mode_effective,
             prefix_tokens=prefix_tokens,
+            smooth_windows=smooth_values,
         )
 
     if varlen_attn is None:
@@ -403,6 +408,17 @@ def sparse_shot_attention(
 
         kv_lengths = []
         k_concat, v_concat = [], []
+        num_shots = len(k_locals)
+        overlap_prev = [0] * num_shots
+        overlap_next = [0] * num_shots
+        if smooth_values:
+            limit = min(len(smooth_values), num_shots - 1)
+            for sid in range(limit):
+                if smooth_values[sid] <= 0 or sid + 1 >= num_shots:
+                    continue
+                overlap_next[sid] = k_locals[sid + 1].size(0)
+                overlap_prev[sid + 1] = k_locals[sid].size(0)
+
         for shot_idx, (k_local, v_local) in enumerate(zip(k_locals, v_locals)):
             parts_k = [k_local]
             parts_v = [v_local]
@@ -412,6 +428,16 @@ def sparse_shot_attention(
             if prefix_k is not None and shot_idx != 0:
                 parts_k.append(prefix_k)
                 parts_v.append(prefix_v)
+            prev_share = overlap_prev[shot_idx] if shot_idx < len(overlap_prev) else 0
+            if prev_share > 0 and shot_idx > 0:
+                prev_local = k_locals[shot_idx - 1]
+                parts_k.append(prev_local[-prev_share:])
+                parts_v.append(v_locals[shot_idx - 1][-prev_share:])
+            next_share = overlap_next[shot_idx] if shot_idx < len(overlap_next) else 0
+            if next_share > 0 and shot_idx + 1 < num_shots:
+                next_local = k_locals[shot_idx + 1]
+                parts_k.append(next_local[:next_share])
+                parts_v.append(v_locals[shot_idx + 1][:next_share])
             k_cat = torch.cat(parts_k, dim=0)
             v_cat = torch.cat(parts_v, dim=0)
             k_concat.append(k_cat)
@@ -462,6 +488,7 @@ def _sparse_shot_attention_fallback(
     causal: bool,
     attention_mode: str,
     prefix_tokens: int = 0,
+    smooth_windows: Optional[Sequence[int]] = None,
 ):
     batch, seqlen, heads, head_dim = q.shape
     q_bhg = rearrange(q, "b s h d -> b h s d").contiguous()
@@ -494,6 +521,17 @@ def _sparse_shot_attention_fallback(
         k_global, v_global = _build_global_reps(k_locals, v_locals, per_g, mode)
 
         out_locals = []
+        num_shots = len(k_locals)
+        overlap_prev = [0] * num_shots
+        overlap_next = [0] * num_shots
+        if smooth_windows:
+            limit = min(len(smooth_windows), num_shots - 1)
+            for sid in range(limit):
+                if smooth_windows[sid] <= 0 or sid + 1 >= num_shots:
+                    continue
+                overlap_next[sid] = k_locals[sid + 1].size(0)
+                overlap_prev[sid + 1] = k_locals[sid].size(0)
+
         for shot_idx, (k_local, v_local, q_local) in enumerate(zip(k_locals, v_locals, q_locals)):
             parts_k = [k_local]
             parts_v = [v_local]
@@ -503,6 +541,16 @@ def _sparse_shot_attention_fallback(
             if prefix_k is not None and shot_idx != 0:
                 parts_k.append(prefix_k)
                 parts_v.append(prefix_v)
+            prev_share = overlap_prev[shot_idx] if shot_idx < len(overlap_prev) else 0
+            if prev_share > 0 and shot_idx > 0:
+                prev_local = k_locals[shot_idx - 1]
+                parts_k.append(prev_local[-prev_share:])
+                parts_v.append(v_locals[shot_idx - 1][-prev_share:])
+            next_share = overlap_next[shot_idx] if shot_idx < len(overlap_next) else 0
+            if next_share > 0 and shot_idx + 1 < num_shots:
+                next_local = k_locals[shot_idx + 1]
+                parts_k.append(next_local[:next_share])
+                parts_v.append(v_locals[shot_idx + 1][:next_share])
 
             k_cat = torch.cat(parts_k, dim=0)
             v_cat = torch.cat(parts_v, dim=0)
