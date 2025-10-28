@@ -1954,6 +1954,8 @@ class WanModel(torch.nn.Module):
         self.vace_layers = vace_layers
         self.device = main_device
         self.patched_linear = False
+        self._shot_embedding_warned_missing = False
+        self._shot_embedding_notified_present = False
 
         if max_shots is None:
             max_shots = 0
@@ -2741,6 +2743,16 @@ class WanModel(torch.nn.Module):
                         shot_block_config["token_absolute"] = token_absolute
         else:
             CustomLinear.runtime_context = None
+
+        if shot_attention_enabled:
+            if self.shot_embedding is None:
+                if not self._shot_embedding_warned_missing:
+                    log.warning("Shot attention enabled but shot embedding is missing in the loaded Wan model; multi-shot transitions may degrade. Please load checkpoints that include `shot_embedding.weight`.")
+                    self._shot_embedding_warned_missing = True
+            else:
+                if not self._shot_embedding_notified_present:
+                    log.info(f"Shot attention enabled: detected shot embedding with max_shots={self.shot_embedding.num_embeddings}.")
+                    self._shot_embedding_notified_present = True
 
         x = [u.flatten(2).transpose(1, 2) for u in x]
         if self.shot_embedding is not None and shot_token_labels is not None:
