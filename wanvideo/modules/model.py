@@ -517,12 +517,18 @@ class WanSelfAttention(nn.Module):
             indices = shot_config.get("indices")
             per_g = shot_config.get("global_tokens", 0)
             mode = shot_config.get("mode", "firstk")
-            backend = (shot_config.get("backend") or "auto") if shot_config else "auto"
+            backend = (shot_config.get("backend") or "full") if shot_config else "full"
             backend = backend.lower()
+            backend = {
+                "sparse_flash": "sparse_flash_attn",
+                "flash": "sparse_flash_attn",
+                "sparse": "sparse_fallback",
+                "dense": "full",
+            }.get(backend, backend)
             prefix_tokens = int(shot_config.get("prefix_tokens", 0) or 0)
             if backend == "full":
                 use_shot_attention = False
-            elif indices is not None and (per_g > 0 or prefix_tokens > 0):
+            elif backend in {"sparse_flash_attn", "sparse_fallback"} and indices is not None and (per_g > 0 or prefix_tokens > 0):
                 x = sparse_shot_attention(
                     q,
                     k,
@@ -536,6 +542,8 @@ class WanSelfAttention(nn.Module):
                     prefix_tokens=prefix_tokens,
                 )
                 use_shot_attention = True
+            else:
+                raise ValueError(f"Unsupported shot attention backend '{backend}'.")
 
         if not use_shot_attention:
             x = attention(q, k, v, k_lens=seq_lens, attention_mode=attention_mode)
@@ -2545,29 +2553,36 @@ class WanModel(torch.nn.Module):
         device = self.main_device
 
         shot_attention_enabled = bool(shot_attention_cfg and shot_attention_cfg.get("enabled", False))
-        shot_backend = (shot_attention_cfg.get("backend", "auto") if shot_attention_enabled else "auto").lower()
+        shot_backend = (shot_attention_cfg.get("backend", "full") if shot_attention_enabled else "full").lower()
         token_mode = None
         token_ratio = None
         token_absolute = None
         if shot_attention_enabled:
+            valid_backends = {"full", "sparse_fallback", "sparse_flash_attn"}
+            backend_aliases = {"sparse_flash": "sparse_flash_attn", "flash": "sparse_flash_attn", "sparse": "sparse_fallback", "dense": "full"}
+            shot_backend = backend_aliases.get(shot_backend, shot_backend)
+            if shot_backend not in valid_backends:
+                raise ValueError(f"Unsupported shot attention backend '{shot_backend}'. Expected one of {sorted(valid_backends)}.")
             raw_token_value = shot_attention_cfg.get("global_token_ratio_or_number", 1.0)
             if not isinstance(raw_token_value, (int, float)):
                 raise ValueError(f"Shot attention expected a numeric global_token_ratio_or_number value, got {type(raw_token_value).__name__} instead.")
             raw_token_value = float(raw_token_value)
             if raw_token_value <= 0.0:
                 raise ValueError("Shot attention requires global_token_ratio_or_number to be > 0.")
-            if raw_token_value <= 1.0:
+            if shot_backend != "full" and raw_token_value <= 1.0:
                 token_mode = "ratio"
                 token_ratio = raw_token_value
-            else:
+            elif shot_backend != "full":
                 if abs(raw_token_value - round(raw_token_value)) > 1e-6 or raw_token_value < 64:
                     raise ValueError("Shot attention numeric mode expects an integer ≥ 64 when global_token_ratio_or_number > 1.")
                 token_mode = "absolute"
                 token_absolute = int(round(raw_token_value))
+            else:
+                token_mode = None
+                token_ratio = None
+                token_absolute = None
         shot_mode = shot_attention_cfg.get("mode", "firstk") if shot_attention_enabled else "firstk"
         if shot_attention_enabled:
-            if shot_backend != "full" and token_mode is None:
-                raise ValueError("Shot attention requires global_token_ratio_or_number to be set (ratio ≤ 1.0 or integer ≥ 64).")
             if shot_indices is None:
                 raise ValueError("Shot attention is enabled but shot_indices are missing. Ensure WanVideoHolocineShotArgs/Holocine Prompt nodes are connected.")
             if isinstance(shot_indices, torch.Tensor):
@@ -2728,7 +2743,7 @@ class WanModel(torch.nn.Module):
             elif token_mode == "absolute":
                 pooled_tokens = token_absolute
             else:
-                pooled_tokens = spatial_tokens  # fallback when backend == "full"
+                pooled_tokens = spatial_tokens  # unused by sparse backends but keeps structure
             pooled_tokens = max(1, min(spatial_tokens, pooled_tokens))
             if shot_backend == "full":
                 shot_block_config = None
