@@ -173,6 +173,103 @@ def assign_shot_lora_to_transformer(transformer, shot_lora_payload):
     return shot_count
 
 
+def _scale_component_strength(component, scale):
+    updated = copy.deepcopy(component)
+    strength = updated.get("strength", 1.0)
+    if isinstance(strength, list):
+        updated["strength"] = [float(val) * scale for val in strength]
+    else:
+        updated["strength"] = float(strength) * scale
+    return updated
+
+
+def _augment_shot_lora_payload(shot_lora_payload, shared_infos):
+    if not shared_infos or not shot_lora_payload:
+        return shot_lora_payload
+    base_payload = list(shot_lora_payload)
+    augmented = list(shot_lora_payload)
+    for info in shared_infos:
+        left_idx = info["left_shot"]
+        right_idx = info["right_shot"]
+        left_patch = base_payload[left_idx] if left_idx < len(base_payload) else {}
+        right_patch = base_payload[right_idx] if right_idx < len(base_payload) else {}
+        shared_patch = {}
+        keys = set(left_patch.keys()) | set(right_patch.keys())
+        for key in keys:
+            components = []
+            if key in left_patch:
+                components.extend(_scale_component_strength(comp, 0.5) for comp in left_patch[key])
+            if key in right_patch:
+                components.extend(_scale_component_strength(comp, 0.5) for comp in right_patch[key])
+            if components:
+                shared_patch[key] = components
+        augmented.append(shared_patch)
+    return augmented
+
+
+def _apply_latent_smoothing(shot_indices_tensor, latent_windows):
+    if shot_indices_tensor is None or shot_indices_tensor.numel() == 0:
+        return shot_indices_tensor, []
+
+    if shot_indices_tensor.dim() != 2:
+        raise ValueError("shot_indices_tensor is expected to have shape [batch, frames].")
+
+    device = shot_indices_tensor.device
+    latent_tensor = shot_indices_tensor.clone()
+    labels = latent_tensor[0]
+    unique_shots = int(labels.max().item()) + 1
+
+    if unique_shots <= 1:
+        return latent_tensor, []
+
+    windows = list(latent_windows or [])
+    if len(windows) < unique_shots:
+        windows.extend([0] * (unique_shots - len(windows)))
+    else:
+        windows = windows[:unique_shots]
+
+    diffs = labels[1:] != labels[:-1]
+    boundary_indices = torch.nonzero(diffs, as_tuple=False).flatten() + 1
+    if boundary_indices.numel() == 0:
+        return latent_tensor, []
+
+    shot_starts = torch.cat([torch.tensor([0], device=device, dtype=torch.long), boundary_indices])
+    shot_ends = torch.cat([boundary_indices, torch.tensor([labels.numel()], device=device, dtype=torch.long)])
+
+    shared_infos = []
+    next_id = unique_shots
+
+    for boundary in boundary_indices:
+        left_shot = int(labels[boundary - 1].item())
+        right_shot = int(labels[boundary].item())
+        window = int(windows[left_shot]) if left_shot < len(windows) else 0
+        if window <= 0:
+            continue
+
+        left_start = int(shot_starts[left_shot].item())
+        left_end = int(boundary.item())
+        right_start = int(boundary.item())
+        right_end = int(shot_ends[left_shot + 1].item())
+
+        share_len = min(window, left_end - left_start, right_end - right_start)
+        if share_len <= 0:
+            continue
+
+        shared_id = next_id
+        next_id += 1
+
+        latent_tensor[:, left_end - share_len:left_end] = shared_id
+        latent_tensor[:, right_start:right_start + share_len] = shared_id
+
+        shared_infos.append({
+            "shared_id": shared_id,
+            "left_shot": left_shot,
+            "right_shot": right_shot,
+        })
+
+    return latent_tensor, shared_infos
+
+
 def offload_transformer(transformer):    
     transformer.teacache_state.clear_all()
     transformer.magcache_state.clear_all()
@@ -334,7 +431,6 @@ class WanVideoSampler:
             shot_lora_payload = prepare_shot_lora_payload(patcher.model, shot_lora_specs)
             if all(len(entry) == 0 for entry in shot_lora_payload):
                 shot_lora_payload = []
-        assign_shot_lora_to_transformer(transformer, shot_lora_payload)
 
         block_swap_args = transformer_options.get("block_swap_args", None)
         if block_swap_args is not None:
@@ -726,6 +822,7 @@ class WanVideoSampler:
         latent_video_length = noise.shape[1]
 
         smooth_windows = None
+        latent_windows = None
         if shot_attention_cfg:
             debug_info = {"holocine_args_present": holocine_args is not None,
                            "text_cut_positions_type": type(text_cut_positions).__name__,
@@ -749,15 +846,28 @@ class WanVideoSampler:
                 legacy_flags = holocine_args.get("smooth_transitions")
                 if legacy_flags is not None:
                     smooth_windows = [SMOOTH_WINDOW_TOKENS if bool(flag) else 0 for flag in legacy_flags]
+            latent_windows = holocine_args.get("latent_smooth_windows")
             try:
                 shot_indices_tensor = build_shot_indices(latent_video_length, shot_cut_frames)
                 shot_indices_tensor = shot_indices_tensor.to(device)
             except Exception as exc:
                 raise ValueError(f"Failed to build shot indices: {exc}. Debug: {debug_info}") from exc
+            shared_infos = []
+            if latent_windows is not None:
+                try:
+                    shot_indices_tensor, shared_infos = _apply_latent_smoothing(shot_indices_tensor, latent_windows)
+                except Exception as exc:
+                    raise ValueError(f"Failed to apply latent smoothing: {exc}. Debug: {debug_info}") from exc
+            if shot_lora_payload:
+                shot_lora_payload = _augment_shot_lora_payload(shot_lora_payload, shared_infos)
         else:
             first_shot_positions = None
             shot_indices_tensor = None
             smooth_windows = None
+            latent_windows = None
+            shared_infos = []
+
+        assign_shot_lora_to_transformer(transformer, shot_lora_payload)
 
         # Initialize FreeInit filter if enabled
         freq_filter = None

@@ -219,6 +219,13 @@ class WanVideoHolocineShotBuilder:
                     "step": 1,
                     "tooltip": "共享给下一镜头的 token 数（0 表示关闭，常见范围 1-12）。"
                 }),
+                "latent_smooth_window": ("INT", {
+                    "default": 0,
+                    "min": 0,
+                    "max": 32,
+                    "step": 1,
+                    "tooltip": "潜空间共享帧数（单位：latent 帧，0 表示关闭）。"
+                }),
             }
         }
 
@@ -228,7 +235,7 @@ class WanVideoHolocineShotBuilder:
     CATEGORY = "WanVideoWrapper/Holocine"
     DESCRIPTION = "Build a Holocine-style structured shot list by chaining this node."
 
-    def process(self, shot_caption, shot_list=None, shot_lora=None, smooth_window=0):
+    def process(self, shot_caption, shot_list=None, shot_lora=None, smooth_window=0, latent_smooth_window=0):
         caption = shot_caption.strip()
         if not caption:
             raise ValueError("Shot caption cannot be empty.")
@@ -247,6 +254,12 @@ class WanVideoHolocineShotBuilder:
             smooth_value = 0
         smooth_value = max(0, smooth_value)
         shot_info["smooth_window"] = smooth_value
+        try:
+            latent_value = int(latent_smooth_window)
+        except Exception:
+            latent_value = 0
+        latent_value = max(0, latent_value)
+        shot_info["latent_smooth_window"] = latent_value
         shots.append(shot_info)
         return (shots,)
 
@@ -320,6 +333,7 @@ class WanVideoHolocinePromptEncode:
         shots = sorted([dict(item) for item in shot_list], key=lambda s: s.get("index", 0))
         shot_lora_config: list[list[dict]] = []
         smooth_windows: list[int] = []
+        latent_windows: list[int] = []
         for shot in shots:
             normalized_loras = []
             loras_raw = shot.get("lora")
@@ -335,6 +349,13 @@ class WanVideoHolocinePromptEncode:
                 window_int = 0
             window_int = max(0, window_int)
             smooth_windows.append(window_int)
+            latent_value = shot.get("latent_smooth_window", 0)
+            try:
+                latent_int = int(latent_value)
+            except Exception:
+                latent_int = 0
+            latent_int = max(0, latent_int)
+            latent_windows.append(latent_int)
 
         inferred_frames = None
         if isinstance(image_embeds, dict):
@@ -397,6 +418,7 @@ class WanVideoHolocinePromptEncode:
             "shot_cut_frames": shot_cuts,
             "shot_loras": shot_lora_config,
             "smooth_windows": smooth_windows,
+            "latent_smooth_windows": latent_windows,
         }
 
         return text_embeds, holocine_args, positive_prompt
