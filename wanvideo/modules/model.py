@@ -510,6 +510,10 @@ class WanSelfAttention(nn.Module):
             except Exception:
                 overlap_frames = 0
             overlap_frames = max(0, overlap_frames)
+            overlap_strategy_cfg = shot_config.get("overlap_strategy", "kv")
+            overlap_strategy_cfg = str(overlap_strategy_cfg).strip().lower()
+            if overlap_strategy_cfg not in {"kv", "average"}:
+                overlap_strategy_cfg = "kv"
             if backend == "full":
                 use_shot_attention = False
             elif backend in {"sparse_flash_attn", "sparse_fallback"} and indices is not None and (per_g > 0 or prefix_tokens > 0):
@@ -525,6 +529,7 @@ class WanSelfAttention(nn.Module):
                     attention_mode=attention_mode,
                     prefix_tokens=prefix_tokens,
                     overlap=overlap_frames,
+                    overlap_strategy=overlap_strategy_cfg,
                 )
                 use_shot_attention = True
             else:
@@ -2421,29 +2426,35 @@ class WanModel(torch.nn.Module):
         token_mode = None
         token_ratio = None
         token_absolute = None
-        shot_overlap_frames = 0
-        try:
-            shot_overlap_frames = max(0, int(shot_overlap or 0))
-        except Exception:
-            shot_overlap_frames = 0
+        shot_overlap_frames = None
+        if shot_overlap is not None:
+            try:
+                shot_overlap_frames = max(0, int(shot_overlap))
+            except Exception:
+                shot_overlap_frames = 0
+        overlap_strategy = "kv"
         if shot_attention_enabled:
             valid_backends = {"full", "sparse_fallback", "sparse_flash_attn"}
             backend_aliases = {"sparse_flash": "sparse_flash_attn", "flash": "sparse_flash_attn", "sparse": "sparse_fallback", "dense": "full"}
             shot_backend = backend_aliases.get(shot_backend, shot_backend)
             if shot_backend not in valid_backends:
                 raise ValueError(f"Unsupported shot attention backend '{shot_backend}'. Expected one of {sorted(valid_backends)}.")
-            try:
-                cfg_overlap_frames = int(shot_attention_cfg.get("overlap_latent_frames", 0))
-            except Exception:
-                cfg_overlap_frames = 0
-            cfg_overlap_frames = max(0, cfg_overlap_frames)
-            if cfg_overlap_frames > shot_overlap_frames:
-                shot_overlap_frames = cfg_overlap_frames
-            if shot_backend == "sparse_flash_attn" and shot_overlap_frames > 0:
+            if shot_overlap_frames is None:
+                try:
+                    shot_overlap_frames = max(0, int(shot_attention_cfg.get("overlap_latent_frames", 0)))
+                except Exception:
+                    shot_overlap_frames = 0
+            overlap_strategy = str(shot_attention_cfg.get("overlap_strategy", "kv")).strip().lower()
+            if overlap_strategy not in {"kv", "average"}:
+                overlap_strategy = "kv"
+            if shot_backend == "sparse_flash_attn" and shot_overlap_frames and shot_overlap_frames > 0:
                 if not self._shot_overlap_flash_warned:
                     log.warning("Shot attention overlap is not supported with sparse_flash_attn backend; forcing overlap_latent_frames to 0.")
                     self._shot_overlap_flash_warned = True
                 shot_overlap_frames = 0
+            if not shot_overlap_frames:
+                shot_overlap_frames = 0
+                overlap_strategy = "kv"
             raw_token_value = shot_attention_cfg.get("global_token_ratio_or_number", 1.0)
             if not isinstance(raw_token_value, (int, float)):
                 raise ValueError(f"Shot attention expected a numeric global_token_ratio_or_number value, got {type(raw_token_value).__name__} instead.")
@@ -2477,6 +2488,7 @@ class WanModel(torch.nn.Module):
                 raise ValueError("shot_indices were provided but shot attention is disabled. Make sure all nodes agree on the mode.")
             shot_indices_tensor = None
             shot_overlap_frames = 0
+            overlap_strategy = "kv"
 
         shot_block_config = None
         cross_attn_mask = None
@@ -2645,6 +2657,7 @@ class WanModel(torch.nn.Module):
                     "backend": shot_backend,
                     "prefix_tokens": prefix_tokens,
                     "overlap": shot_overlap_frames,
+                    "overlap_strategy": overlap_strategy,
                 }
                 if token_mode is not None:
                     shot_block_config["token_mode"] = token_mode

@@ -456,6 +456,10 @@ class WanVideoHolocineSetShotAttention:
                     "step": 1,
                     "tooltip": "相邻稀疏镜头之间额外共享的 latent 帧数。仅对 sparse_fallback 有效。"
                 }),
+                "overlap_strategy": (["kv", "average"], {
+                    "default": "kv",
+                    "tooltip": "选择重叠融合策略：'kv' 仅扩展键值窗口，'average' 为重叠区域输出做均值融合。"
+                }),
             }
         }
 
@@ -464,7 +468,7 @@ class WanVideoHolocineSetShotAttention:
     FUNCTION = "apply"
     CATEGORY = "WanVideoWrapper/Holocine"
 
-    def apply(self, model, enable, global_token_ratio_or_number, mask_type="none", backend="full", i2v_mode=False, overlap_latent_frames=0):
+    def apply(self, model, enable, global_token_ratio_or_number, mask_type="none", backend="full", i2v_mode=False, overlap_latent_frames=0, overlap_strategy="kv"):
         value = float(global_token_ratio_or_number)
         if value <= 0.0:
             raise ValueError("global_token_ratio_or_number must be > 0. Use values ≤ 1.0 for ratios or integers ≥ 64 for absolute counts.")
@@ -476,6 +480,9 @@ class WanVideoHolocineSetShotAttention:
         except Exception:
             overlap_frames = 0
         overlap_frames = max(0, overlap_frames)
+        strategy = str(overlap_strategy).strip().lower()
+        if strategy not in {"kv", "average"}:
+            strategy = "kv"
         patcher = model.clone()
         transformer_options = patcher.model_options.setdefault("transformer_options", {})
         transformer_options["shot_attention"] = {
@@ -486,6 +493,7 @@ class WanVideoHolocineSetShotAttention:
             "backend": backend,
             "i2v_mode": bool(i2v_mode),
             "overlap_latent_frames": overlap_frames,
+            "overlap_strategy": strategy,
         }
         return (patcher,)
 

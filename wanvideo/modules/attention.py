@@ -328,6 +328,7 @@ def sparse_shot_attention(
     attention_mode: str = "sdpa",
     prefix_tokens: int = 0,
     overlap: int = 0,
+    overlap_strategy: str = "kv",
 ):
     """Shot-aware attention with optional varlen flash kernels or dense fallback."""
     if q.shape != k.shape or q.shape != v.shape:
@@ -344,6 +345,9 @@ def sparse_shot_attention(
     except Exception:
         overlap = 0
     overlap = max(0, overlap)
+    overlap_strategy = str(overlap_strategy or "kv").strip().lower()
+    if overlap_strategy not in {"kv", "average"}:
+        overlap_strategy = "kv"
 
     if backend not in {"sparse_flash_attn", "sparse_fallback"}:
         raise ValueError(f"Unsupported sparse shot attention backend '{backend}'.")
@@ -352,6 +356,7 @@ def sparse_shot_attention(
     if backend == "sparse_flash_attn":
         if overlap > 0:
             overlap = 0
+            overlap_strategy = "kv"
         varlen_attn = _get_flash_attn_varlen(required=False)
         if varlen_attn is None:
             global _VARLEN_FALLBACK_WARNED
@@ -375,6 +380,7 @@ def sparse_shot_attention(
             attention_mode=attn_mode_effective,
             prefix_tokens=prefix_tokens,
             overlap=overlap,
+            overlap_strategy=overlap_strategy,
         )
 
     if varlen_attn is None:
@@ -472,6 +478,7 @@ def _sparse_shot_attention_fallback(
     attention_mode: str,
     prefix_tokens: int = 0,
     overlap: int = 0,
+    overlap_strategy: str = "kv",
 ):
     batch, seqlen, heads, head_dim = q.shape
     q_bhg = rearrange(q, "b s h d -> b h s d").contiguous()
@@ -482,6 +489,9 @@ def _sparse_shot_attention_fallback(
     except Exception:
         overlap = 0
     overlap = max(0, overlap)
+    strategy = str(overlap_strategy or "kv").strip().lower()
+    if strategy not in {"kv", "average"}:
+        strategy = "kv"
 
     outputs = []
 
@@ -508,11 +518,17 @@ def _sparse_shot_attention_fallback(
 
         k_global, v_global = _build_global_reps(k_locals, v_locals, per_g, mode)
 
-        out_locals = []
+        use_average = overlap > 0 and strategy == "average"
+        if use_average:
+            accum = torch.zeros_like(q_bhg[b_idx])
+            counts = torch.zeros((heads, seqlen), dtype=accum.dtype, device=accum.device)
+        else:
+            out_locals: List[torch.Tensor] = []
+
         for shot_idx, q_local in enumerate(q_locals):
             start = cuts[shot_idx]
             end = cuts[shot_idx + 1]
-            if overlap > 0:
+            if use_average:
                 window_start = max(0, start - overlap)
                 window_end = min(seqlen, end + overlap)
             else:
@@ -535,7 +551,9 @@ def _sparse_shot_attention_fallback(
             k_cat = torch.cat(parts_k, dim=0)
             v_cat = torch.cat(parts_v, dim=0)
 
-            q_chunk = rearrange(q_local, "s h d -> 1 s h d")
+            q_window = q_bhg[b_idx, :, window_start:window_end, :] if use_average else q_bhg[b_idx, :, start:end, :]
+            q_window = rearrange(q_window, "h s d -> s h d")
+            q_chunk = rearrange(q_window, "s h d -> 1 s h d")
             k_chunk = rearrange(k_cat, "s h d -> 1 s h d")
             v_chunk = rearrange(v_cat, "s h d -> 1 s h d")
 
@@ -548,10 +566,20 @@ def _sparse_shot_attention_fallback(
                 causal=causal,
             )
 
-            out_locals.append(attn_out.squeeze(0))
+            if use_average:
+                out_window = rearrange(attn_out.squeeze(0), "s h d -> h s d")
+                accum[:, window_start:window_end, :].add_(out_window)
+                counts[:, window_start:window_end].add_(1.0)
+            else:
+                out_locals.append(attn_out.squeeze(0))
 
-        out_cat = torch.cat(out_locals, dim=0)
-        outputs.append(rearrange(out_cat, "s h d -> h s d"))
+        if use_average:
+            counts = counts.clamp_min(1.0)
+            averaged = accum / counts.unsqueeze(-1)
+            outputs.append(averaged)
+        else:
+            out_cat = torch.cat(out_locals, dim=0)
+            outputs.append(rearrange(out_cat, "s h d -> h s d"))
 
     stacked = torch.stack(outputs, dim=0)
     return rearrange(stacked, "b h s d -> b s h d")

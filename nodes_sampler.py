@@ -327,6 +327,7 @@ class WanVideoSampler:
             shot_attention_cfg.setdefault("backend", "full")
             shot_attention_cfg.setdefault("global_token_ratio_or_number", 1.0)
             shot_attention_cfg.setdefault("overlap_latent_frames", 0)
+            shot_attention_cfg.setdefault("overlap_strategy", "kv")
             shot_mask_type = shot_attention_cfg.get("mask_type")
 
         shot_lora_specs = holocine_args.get("shot_loras") if args_present else None
