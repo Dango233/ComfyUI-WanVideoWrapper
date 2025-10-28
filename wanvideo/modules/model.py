@@ -808,7 +808,7 @@ class WanI2VCrossAttention(WanSelfAttention):
 
     def forward(self, x, context, grid_sizes=None, clip_embed=None, audio_proj=None, 
                 audio_scale=1.0, num_latent_frames=21, nag_params={}, nag_context=None, is_uncond=False, rope_func="comfy", 
-                adapter_proj=None, adapter_attn_mask=None, ip_scale=1.0, orig_seq_len=None, **kwargs):
+                adapter_proj=None, adapter_attn_mask=None, ip_scale=1.0, orig_seq_len=None, attn_mask=None, **kwargs):
         r"""
         Args:
             x(Tensor): Shape [B, L1, C]
@@ -830,13 +830,20 @@ class WanI2VCrossAttention(WanSelfAttention):
         if text_context.shape[1] == 0:
             raise ValueError("Text context is empty after removing image tokens; cannot perform cross attention.")
 
+        if attn_mask is not None and clip_len > 0:
+            text_attn_mask = attn_mask[..., clip_len:]
+        else:
+            text_attn_mask = attn_mask
+        if text_attn_mask is not None and text_attn_mask.dtype != q.dtype:
+            text_attn_mask = text_attn_mask.to(q.dtype)
+
         if nag_context is not None and not is_uncond:
             x_text = self.normalized_attention_guidance(b, n, d, q, text_context, nag_context, nag_params)
         else:
             # text attention
             k = self.norm_k(self.k(text_context)).view(b, -1, n, d)
             v = self.v(text_context).view(b, -1, n, d)
-            x_text = attention(q, k, v, attention_mode=self.attention_mode).flatten(2)
+            x_text = attention(q, k, v, attention_mode=self.attention_mode, attn_mask=text_attn_mask).flatten(2)
 
         #img attention
         if clip_embed is not None:
