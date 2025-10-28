@@ -11,6 +11,7 @@ log = logging.getLogger(__name__)
 
 
 LATENT_FRAME_STRIDE = 4
+SMOOTH_WINDOW_TOKENS = 12
 
 
 def enforce_4t_plus_1(n: int) -> int:
@@ -284,6 +285,7 @@ def build_cross_attention_mask(
     num_heads: int = 1,
     block_value: float = -1e4,
     num_image_tokens: int = 0,
+    smooth_windows: Optional[Sequence[int]] = None,
 ) -> Optional[torch.Tensor]:
     if positions is None or positions.get("global") is None:
         return None
@@ -303,6 +305,20 @@ def build_cross_attention_mask(
     if len(shot_ranges) == 0 and shot_indices.numel() > 0 and shot_indices.max().item() > 0:
         return None
 
+    smooth_values: Optional[List[int]] = None
+    if smooth_windows is not None:
+        collected: List[int] = []
+        for value in smooth_windows:
+            if isinstance(value, bool):
+                collected.append(SMOOTH_WINDOW_TOKENS if value else 0)
+                continue
+            try:
+                collected.append(max(0, int(value)))
+            except Exception:
+                collected.append(0)
+        if any(v > 0 for v in collected):
+            smooth_values = collected
+
     batch, latent_frames = shot_indices.shape
     vid_shot = shot_indices.repeat_interleave(spatial_tokens, dim=1)
 
@@ -321,6 +337,33 @@ def build_cross_attention_mask(
             s1 = max(0, min(text_context_length, int(s1)))
             end_inclusive = min(text_context_length, s1 + 1)
             shot_table[sid, s0:end_inclusive] = True
+        if smooth_values:
+            max_sid = min(len(smooth_values), shot_table.size(0))
+            for sid in range(max_sid):
+                window = smooth_values[sid]
+                if window <= 0 or sid + 1 >= shot_table.size(0):
+                    continue
+
+                cur_start_raw, cur_end_raw = shot_ranges[sid]
+                next_start_raw, next_end_raw = shot_ranges[sid + 1]
+
+                cur_start = max(0, min(text_context_length, int(cur_start_raw)))
+                cur_end_exclusive = max(cur_start, min(text_context_length, int(cur_end_raw) + 1))
+                next_start = max(0, min(text_context_length, int(next_start_raw)))
+                next_end_exclusive = max(next_start, min(text_context_length, int(next_end_raw) + 1))
+
+                cur_len = max(1, cur_end_exclusive - cur_start)
+                next_len = max(1, next_end_exclusive - next_start)
+                capped_window = max(1, min(window, text_context_length))
+                share_len = max(1, min(capped_window, cur_len, next_len))
+
+                cur_share_start = max(cur_start, cur_end_exclusive - share_len)
+                next_share_end = min(next_end_exclusive, next_start + share_len)
+
+                if next_share_end > next_start:
+                    shot_table[sid, next_start:next_share_end] = True
+                if cur_end_exclusive > cur_share_start:
+                    shot_table[sid + 1, cur_share_start:cur_end_exclusive] = True
         allow = shot_table[vid_shot]
         allow = allow | global_mask.view(1, 1, text_context_length)
     else:

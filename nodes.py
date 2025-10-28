@@ -212,6 +212,13 @@ class WanVideoHolocineShotBuilder:
             "optional": {
                 "shot_list": ("WANVID_HOLOCINE_SHOT_LIST",),
                 "shot_lora": ("WANVIDLORA", {"default": None, "tooltip": "可选：为当前镜头附加的 LoRA 列表，会在采样时按镜头聚合。"}),
+                "smooth_window": ("INT", {
+                    "default": 0,
+                    "min": 0,
+                    "max": 64,
+                    "step": 1,
+                    "tooltip": "共享给下一镜头的 token 数（0 表示关闭，常见范围 1-12）。"
+                }),
             }
         }
 
@@ -221,7 +228,7 @@ class WanVideoHolocineShotBuilder:
     CATEGORY = "WanVideoWrapper/Holocine"
     DESCRIPTION = "Build a Holocine-style structured shot list by chaining this node."
 
-    def process(self, shot_caption, shot_list=None, shot_lora=None):
+    def process(self, shot_caption, shot_list=None, shot_lora=None, smooth_window=0):
         caption = shot_caption.strip()
         if not caption:
             raise ValueError("Shot caption cannot be empty.")
@@ -234,6 +241,12 @@ class WanVideoHolocineShotBuilder:
         }
         if shot_lora is not None:
             shot_info["lora"] = list(shot_lora)
+        try:
+            smooth_value = int(smooth_window)
+        except Exception:
+            smooth_value = 0
+        smooth_value = max(0, smooth_value)
+        shot_info["smooth_window"] = smooth_value
         shots.append(shot_info)
         return (shots,)
 
@@ -306,16 +319,22 @@ class WanVideoHolocinePromptEncode:
 
         shots = sorted([dict(item) for item in shot_list], key=lambda s: s.get("index", 0))
         shot_lora_config: list[list[dict]] = []
+        smooth_windows: list[int] = []
         for shot in shots:
-            loras_raw = shot.get("lora")
-            if not loras_raw:
-                shot_lora_config.append([])
-                continue
             normalized_loras = []
-            for entry in loras_raw:
-                if isinstance(entry, dict):
-                    normalized_loras.append(dict(entry))
+            loras_raw = shot.get("lora")
+            if loras_raw:
+                for entry in loras_raw:
+                    if isinstance(entry, dict):
+                        normalized_loras.append(dict(entry))
             shot_lora_config.append(normalized_loras)
+            window_value = shot.get("smooth_window", 0)
+            try:
+                window_int = int(window_value)
+            except Exception:
+                window_int = 0
+            window_int = max(0, window_int)
+            smooth_windows.append(window_int)
 
         inferred_frames = None
         if isinstance(image_embeds, dict):
@@ -377,6 +396,7 @@ class WanVideoHolocinePromptEncode:
             "total_frames": total_frames,
             "shot_cut_frames": shot_cuts,
             "shot_loras": shot_lora_config,
+            "smooth_windows": smooth_windows,
         }
 
         return text_embeds, holocine_args, positive_prompt

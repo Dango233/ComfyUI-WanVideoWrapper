@@ -2322,6 +2322,7 @@ class WanModel(torch.nn.Module):
         shot_attention_cfg=None,
         shot_mask_type=None,
         text_cut_positions=None,
+        smooth_windows=None,
     ):
         r"""
         Forward pass through the diffusion model
@@ -2899,6 +2900,7 @@ class WanModel(torch.nn.Module):
                     device=x[0].device,
                     dtype=x[0].dtype,
                     num_image_tokens=clip_token_count,
+                    smooth_windows=smooth_windows,
                 )
             except Exception as exc:
                 raise ValueError(f"Failed to build cross-attention mask for shot attention: {exc}") from exc
