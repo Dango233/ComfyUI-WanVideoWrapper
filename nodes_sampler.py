@@ -9,7 +9,7 @@ from diffusers.schedulers import FlowMatchEulerDiscreteScheduler
 from .wanvideo.modules.model import rope_params
 from .custom_linear import remove_lora_from_module, set_lora_params, set_shot_lora_params, _replace_linear
 from .wanvideo.schedulers import get_scheduler, get_sampling_sigmas, retrieve_timesteps, scheduler_list
-from .wanvideo.modules.shot_utils import build_shot_indices
+from .wanvideo.modules.shot_utils import build_shot_indices, SMOOTH_WINDOW_TOKENS
 from .gguf.gguf import set_lora_params_gguf
 from .multitalk.multitalk import timestep_transform, add_noise
 from .utils import(log, print_memory, apply_lora, clip_encode_image_tiled, fourier_filter, optimized_scale, setup_radial_attention,
@@ -725,6 +725,7 @@ class WanVideoSampler:
 
         latent_video_length = noise.shape[1]
 
+        smooth_windows = None
         if shot_attention_cfg:
             debug_info = {"holocine_args_present": holocine_args is not None,
                            "text_cut_positions_type": type(text_cut_positions).__name__,
@@ -743,6 +744,11 @@ class WanVideoSampler:
                 raise ValueError(f"Shot attention expects [global caption]/[per shot caption]/[shot cut] tags in the prompt. Debug: {debug_info}")
 
             shot_cut_frames = holocine_args.get("shot_cut_frames", [])
+            smooth_windows = holocine_args.get("smooth_windows")
+            if smooth_windows is None:
+                legacy_flags = holocine_args.get("smooth_transitions")
+                if legacy_flags is not None:
+                    smooth_windows = [SMOOTH_WINDOW_TOKENS if bool(flag) else 0 for flag in legacy_flags]
             try:
                 shot_indices_tensor = build_shot_indices(latent_video_length, shot_cut_frames)
                 shot_indices_tensor = shot_indices_tensor.to(device)
@@ -751,6 +757,7 @@ class WanVideoSampler:
         else:
             first_shot_positions = None
             shot_indices_tensor = None
+            smooth_windows = None
 
         # Initialize FreeInit filter if enabled
         freq_filter = None
@@ -1557,6 +1564,7 @@ class WanVideoSampler:
                     'shot_attention_cfg': shot_attention_cfg,
                     'shot_mask_type': shot_mask_type,
                     'text_cut_positions': first_shot_positions if shot_attention_cfg else None,
+                    'smooth_windows': smooth_windows if shot_attention_cfg else None,
                     "uni3c_data": uni3c_data_input, # Uni3C input
                     "controlnet": controlnet, # TheDenk's controlnet input
                     "add_cond": add_cond_input, # additional conditioning input
@@ -1621,9 +1629,12 @@ class WanVideoSampler:
                             return noise_pred_cond, noise_pred_ovi, [cache_state_cond]
 
                         positions_backup = None
+                        smooth_backup = None
                         if shot_attention_cfg:
                             positions_backup = base_params.get('text_cut_positions')
+                            smooth_backup = base_params.get('smooth_windows')
                             base_params['text_cut_positions'] = None
+                            base_params['smooth_windows'] = None
                         try:
                             #unconditional (negative) pass
                             base_params['is_uncond'] = True
@@ -1727,6 +1738,7 @@ class WanVideoSampler:
                         finally:
                             if shot_attention_cfg:
                                 base_params['text_cut_positions'] = positions_backup
+                                base_params['smooth_windows'] = smooth_backup
                             base_params['is_uncond'] = False
 
                     #batched
