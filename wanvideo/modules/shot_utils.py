@@ -286,6 +286,7 @@ def build_cross_attention_mask(
     block_value: float = -1e4,
     num_image_tokens: int = 0,
     smooth_windows: Optional[Sequence[int]] = None,
+    shared_infos: Optional[Sequence[Dict[str, int]]] = None,
 ) -> Optional[torch.Tensor]:
     if positions is None or positions.get("global") is None:
         return None
@@ -330,8 +331,11 @@ def build_cross_attention_mask(
         end_inclusive = min(text_context_length, g1 + 1)
         global_mask[g0:end_inclusive] = True
 
+    max_label = int(vid_shot.max().item()) if vid_shot.numel() > 0 else 0
     if len(shot_ranges) > 0:
-        shot_table = torch.zeros(len(shot_ranges), text_context_length, dtype=torch.bool, device=device)
+        base_rows = len(shot_ranges)
+        total_rows = max(base_rows, max_label + 1)
+        shot_table = torch.zeros(total_rows, text_context_length, dtype=torch.bool, device=device)
         for sid, (s0, s1) in enumerate(shot_ranges):
             s0 = max(0, min(text_context_length, int(s0)))
             s1 = max(0, min(text_context_length, int(s1)))
@@ -364,6 +368,19 @@ def build_cross_attention_mask(
                     shot_table[sid, next_start:next_share_end] = True
                 if cur_end_exclusive > cur_share_start:
                     shot_table[sid + 1, cur_share_start:cur_end_exclusive] = True
+        if shared_infos:
+            for info in shared_infos:
+                shared_id = int(info.get("shared_id", -1))
+                left_shot = int(info.get("left_shot", -1))
+                right_shot = int(info.get("right_shot", -1))
+                if shared_id < 0 or shared_id >= shot_table.size(0):
+                    continue
+                row = torch.zeros(text_context_length, dtype=torch.bool, device=device)
+                if 0 <= left_shot < shot_table.size(0):
+                    row |= shot_table[left_shot]
+                if 0 <= right_shot < shot_table.size(0):
+                    row |= shot_table[right_shot]
+                shot_table[shared_id] = row
         allow = shot_table[vid_shot]
         allow = allow | global_mask.view(1, 1, text_context_length)
     else:

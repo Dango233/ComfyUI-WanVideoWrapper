@@ -207,7 +207,7 @@ def _augment_shot_lora_payload(shot_lora_payload, shared_infos):
     return augmented
 
 
-def _apply_latent_smoothing(shot_indices_tensor, latent_windows):
+def _apply_latent_smoothing(shot_indices_tensor, latent_windows, max_shot_capacity=None):
     if shot_indices_tensor is None or shot_indices_tensor.numel() == 0:
         return shot_indices_tensor, []
 
@@ -238,6 +238,7 @@ def _apply_latent_smoothing(shot_indices_tensor, latent_windows):
 
     shared_infos = []
     next_id = unique_shots
+    capacity = max_shot_capacity if (max_shot_capacity is not None and max_shot_capacity >= 0) else None
 
     for boundary in boundary_indices:
         left_shot = int(labels[boundary - 1].item())
@@ -256,6 +257,15 @@ def _apply_latent_smoothing(shot_indices_tensor, latent_windows):
             continue
 
         shared_id = next_id
+        if capacity is not None and shared_id >= capacity:
+            log.warning(
+                "Latent smoothing skipped for boundary between shots %d and %d: "
+                "shot embedding capacity=%d cannot host additional shared IDs.",
+                left_shot,
+                right_shot,
+                capacity,
+            )
+            continue
         next_id += 1
 
         latent_tensor[:, left_end - share_len:left_end] = shared_id
@@ -855,7 +865,17 @@ class WanVideoSampler:
             shared_infos = []
             if latent_windows is not None:
                 try:
-                    shot_indices_tensor, shared_infos = _apply_latent_smoothing(shot_indices_tensor, latent_windows)
+                    shot_embed = getattr(transformer, "shot_embedding", None)
+                    max_capacity = None
+                    if shot_embed is not None and hasattr(shot_embed, "num_embeddings"):
+                        max_capacity = int(shot_embed.num_embeddings)
+                    if max_capacity is not None and max_capacity <= 0:
+                        max_capacity = None
+                    shot_indices_tensor, shared_infos = _apply_latent_smoothing(
+                        shot_indices_tensor,
+                        latent_windows,
+                        max_shot_capacity=max_capacity,
+                    )
                 except Exception as exc:
                     raise ValueError(f"Failed to apply latent smoothing: {exc}. Debug: {debug_info}") from exc
             if shot_lora_payload:
@@ -1675,6 +1695,7 @@ class WanVideoSampler:
                     'shot_mask_type': shot_mask_type,
                     'text_cut_positions': first_shot_positions if shot_attention_cfg else None,
                     'smooth_windows': smooth_windows if shot_attention_cfg else None,
+                    'latent_shared_infos': shared_infos if shared_infos else None,
                     "uni3c_data": uni3c_data_input, # Uni3C input
                     "controlnet": controlnet, # TheDenk's controlnet input
                     "add_cond": add_cond_input, # additional conditioning input
@@ -1740,11 +1761,14 @@ class WanVideoSampler:
 
                         positions_backup = None
                         smooth_backup = None
+                        shared_backup = None
                         if shot_attention_cfg:
                             positions_backup = base_params.get('text_cut_positions')
                             smooth_backup = base_params.get('smooth_windows')
+                            shared_backup = base_params.get('latent_shared_infos')
                             base_params['text_cut_positions'] = None
                             base_params['smooth_windows'] = None
+                            base_params['latent_shared_infos'] = None
                         try:
                             #unconditional (negative) pass
                             base_params['is_uncond'] = True
@@ -1849,6 +1873,7 @@ class WanVideoSampler:
                             if shot_attention_cfg:
                                 base_params['text_cut_positions'] = positions_backup
                                 base_params['smooth_windows'] = smooth_backup
+                                base_params['latent_shared_infos'] = shared_backup
                             base_params['is_uncond'] = False
 
                     #batched
