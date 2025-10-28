@@ -2471,12 +2471,17 @@ class WanModel(torch.nn.Module):
 
         # patch embed
         # Append shot mask feature (Holocine-style) when available and supported
-        mask_mode = (shot_mask_type or "id").lower()
-        valid_mask_modes = {"id", "normalized", "alternating"}
+        mask_mode = (shot_mask_type or "none").lower()
+        valid_mask_modes = {"none", "id", "normalized", "alternating"}
         if mask_mode not in valid_mask_modes:
             raise ValueError(f"Shot mask mode '{mask_mode}' is not supported. Expected one of {sorted(valid_mask_modes)}.")
 
-        if shot_indices_tensor is not None and isinstance(x, (list, tuple)) and len(x) > 0 and shot_backend != "full":
+        if (
+            shot_indices_tensor is not None
+            and isinstance(x, (list, tuple))
+            and len(x) > 0
+            and mask_mode != "none"
+        ):
             sample_channels = x[0].shape[0]
             expected_in_channels = self.original_patch_embedding.weight.shape[1]
             if expected_in_channels == sample_channels + 1:
