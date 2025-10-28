@@ -2752,11 +2752,11 @@ class WanModel(torch.nn.Module):
         if shot_attention_enabled:
             if self.shot_embedding is None:
                 if not self._shot_embedding_warned_missing:
-                    log.warning("Shot attention enabled but shot embedding is missing in the loaded Wan model; multi-shot transitions may degrade. Please load checkpoints that include `shot_embedding.weight`.")
+                    log.info("Shot attention enabled: running without shot embedding.")
                     self._shot_embedding_warned_missing = True
             else:
                 if not self._shot_embedding_notified_present:
-                    log.info(f"Shot attention enabled: detected shot embedding with max_shots={self.shot_embedding.num_embeddings}.")
+                    log.info(f"Shot attention enabled: running with shot embedding (max_shots={self.shot_embedding.num_embeddings}).")
                     self._shot_embedding_notified_present = True
 
         x = [u.flatten(2).transpose(1, 2) for u in x]
