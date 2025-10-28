@@ -324,7 +324,7 @@ class WanVideoSampler:
             shot_attention_cfg.setdefault("enabled", True)
             shot_attention_cfg["mode"] = "firstk"
             shot_attention_cfg.setdefault("mask_type", "none")
-            shot_attention_cfg.setdefault("backend", "auto")
+            shot_attention_cfg.setdefault("backend", "full")
             shot_attention_cfg.setdefault("global_token_ratio_or_number", 1.0)
             shot_mask_type = shot_attention_cfg.get("mask_type")
 

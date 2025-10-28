@@ -332,15 +332,15 @@ def sparse_shot_attention(
     if q.shape != k.shape or q.shape != v.shape:
         raise ValueError("q, k, v must share the same shape")
 
-    backend = (backend or "auto").lower()
+    backend = (backend or "sparse_fallback").lower()
     backend = {
         "flash": "sparse_flash_attn",
         "dense": "sparse_fallback",
     }.get(backend, backend)
     attn_mode_effective = (attention_mode or "sdpa")
 
-    if backend == "auto":
-        backend = "sparse_flash_attn" if attn_mode_effective.startswith("flash") else "sparse_fallback"
+    if backend not in {"sparse_flash_attn", "sparse_fallback"}:
+        raise ValueError(f"Unsupported sparse shot attention backend '{backend}'.")
 
     varlen_attn = None
     if backend == "sparse_flash_attn":
