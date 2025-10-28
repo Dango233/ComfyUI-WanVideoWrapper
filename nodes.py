@@ -219,6 +219,13 @@ class WanVideoHolocineShotBuilder:
                     "step": 1,
                     "tooltip": "共享给下一镜头的 token 数（0 表示关闭，常见范围 1-12）。"
                 }),
+                "overlap_latent_frames": ("INT", {
+                    "default": 0,
+                    "min": 0,
+                    "max": 64,
+                    "step": 1,
+                    "tooltip": "用于稀疏前向的邻接镜头重叠 latent 帧数（0 表示关闭）。"
+                }),
             }
         }
 
@@ -228,7 +235,7 @@ class WanVideoHolocineShotBuilder:
     CATEGORY = "WanVideoWrapper/Holocine"
     DESCRIPTION = "Build a Holocine-style structured shot list by chaining this node."
 
-    def process(self, shot_caption, shot_list=None, shot_lora=None, smooth_window=0):
+    def process(self, shot_caption, shot_list=None, shot_lora=None, smooth_window=0, overlap_latent_frames=0):
         caption = shot_caption.strip()
         if not caption:
             raise ValueError("Shot caption cannot be empty.")
@@ -247,6 +254,12 @@ class WanVideoHolocineShotBuilder:
             smooth_value = 0
         smooth_value = max(0, smooth_value)
         shot_info["smooth_window"] = smooth_value
+        try:
+            overlap_value = int(overlap_latent_frames)
+        except Exception:
+            overlap_value = 0
+        overlap_value = max(0, overlap_value)
+        shot_info["overlap_latent_frames"] = overlap_value
         shots.append(shot_info)
         return (shots,)
 
@@ -320,6 +333,7 @@ class WanVideoHolocinePromptEncode:
         shots = sorted([dict(item) for item in shot_list], key=lambda s: s.get("index", 0))
         shot_lora_config: list[list[dict]] = []
         smooth_windows: list[int] = []
+        overlap_windows: list[int] = []
         for shot in shots:
             normalized_loras = []
             loras_raw = shot.get("lora")
@@ -335,6 +349,13 @@ class WanVideoHolocinePromptEncode:
                 window_int = 0
             window_int = max(0, window_int)
             smooth_windows.append(window_int)
+            overlap_value = shot.get("overlap_latent_frames", 0)
+            try:
+                overlap_int = int(overlap_value)
+            except Exception:
+                overlap_int = 0
+            overlap_int = max(0, overlap_int)
+            overlap_windows.append(overlap_int)
 
         inferred_frames = None
         if isinstance(image_embeds, dict):
@@ -397,6 +418,7 @@ class WanVideoHolocinePromptEncode:
             "shot_cut_frames": shot_cuts,
             "shot_loras": shot_lora_config,
             "smooth_windows": smooth_windows,
+            "overlap_latent_frames": overlap_windows,
         }
 
         return text_embeds, holocine_args, positive_prompt
@@ -427,6 +449,13 @@ class WanVideoHolocineSetShotAttention:
                     "tooltip": "Select shot attention backend: full (dense), sparse_fallback (simulated sparse), or sparse_flash_attn (FlashAttention varlen)."
                 }),
                 "i2v_mode": ("BOOLEAN", {"default": False, "tooltip": "Treat the first latent slice as a global anchor (manual I2V mode)."}),
+                "overlap_latent_frames": ("INT", {
+                    "default": 0,
+                    "min": 0,
+                    "max": 64,
+                    "step": 1,
+                    "tooltip": "相邻稀疏镜头之间额外共享的 latent 帧数。仅对 sparse_fallback 有效。"
+                }),
             }
         }
 
@@ -435,13 +464,18 @@ class WanVideoHolocineSetShotAttention:
     FUNCTION = "apply"
     CATEGORY = "WanVideoWrapper/Holocine"
 
-    def apply(self, model, enable, global_token_ratio_or_number, mask_type="none", backend="full", i2v_mode=False):
+    def apply(self, model, enable, global_token_ratio_or_number, mask_type="none", backend="full", i2v_mode=False, overlap_latent_frames=0):
         value = float(global_token_ratio_or_number)
         if value <= 0.0:
             raise ValueError("global_token_ratio_or_number must be > 0. Use values ≤ 1.0 for ratios or integers ≥ 64 for absolute counts.")
         if value > 1.0:
             if abs(value - round(value)) > 1e-6 or value < 64.0:
                 raise ValueError("global_token_ratio_or_number > 1.0 requires an integer ≥ 64.")
+        try:
+            overlap_frames = int(overlap_latent_frames)
+        except Exception:
+            overlap_frames = 0
+        overlap_frames = max(0, overlap_frames)
         patcher = model.clone()
         transformer_options = patcher.model_options.setdefault("transformer_options", {})
         transformer_options["shot_attention"] = {
@@ -451,6 +485,7 @@ class WanVideoHolocineSetShotAttention:
             "mask_type": mask_type,
             "backend": backend,
             "i2v_mode": bool(i2v_mode),
+            "overlap_latent_frames": overlap_frames,
         }
         return (patcher,)
 

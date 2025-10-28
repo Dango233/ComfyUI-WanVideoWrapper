@@ -504,6 +504,12 @@ class WanSelfAttention(nn.Module):
                 "dense": "full",
             }.get(backend, backend)
             prefix_tokens = int(shot_config.get("prefix_tokens", 0) or 0)
+            overlap_frames = shot_config.get("overlap", 0)
+            try:
+                overlap_frames = int(overlap_frames)
+            except Exception:
+                overlap_frames = 0
+            overlap_frames = max(0, overlap_frames)
             if backend == "full":
                 use_shot_attention = False
             elif backend in {"sparse_flash_attn", "sparse_fallback"} and indices is not None and (per_g > 0 or prefix_tokens > 0):
@@ -518,6 +524,7 @@ class WanSelfAttention(nn.Module):
                     backend=backend,
                     attention_mode=attention_mode,
                     prefix_tokens=prefix_tokens,
+                    overlap=overlap_frames,
                 )
                 use_shot_attention = True
             else:
@@ -1828,6 +1835,7 @@ class WanModel(torch.nn.Module):
         self.patched_linear = False
         self._shot_embedding_warned_missing = False
         self._shot_embedding_notified_present = False
+        self._shot_overlap_flash_warned = False
         self._shot_mask_channel_warned = False
 
         if max_shots is None:
@@ -2323,6 +2331,7 @@ class WanModel(torch.nn.Module):
         shot_mask_type=None,
         text_cut_positions=None,
         smooth_windows=None,
+        shot_overlap=0,
     ):
         r"""
         Forward pass through the diffusion model
@@ -2412,12 +2421,29 @@ class WanModel(torch.nn.Module):
         token_mode = None
         token_ratio = None
         token_absolute = None
+        shot_overlap_frames = 0
+        try:
+            shot_overlap_frames = max(0, int(shot_overlap or 0))
+        except Exception:
+            shot_overlap_frames = 0
         if shot_attention_enabled:
             valid_backends = {"full", "sparse_fallback", "sparse_flash_attn"}
             backend_aliases = {"sparse_flash": "sparse_flash_attn", "flash": "sparse_flash_attn", "sparse": "sparse_fallback", "dense": "full"}
             shot_backend = backend_aliases.get(shot_backend, shot_backend)
             if shot_backend not in valid_backends:
                 raise ValueError(f"Unsupported shot attention backend '{shot_backend}'. Expected one of {sorted(valid_backends)}.")
+            try:
+                cfg_overlap_frames = int(shot_attention_cfg.get("overlap_latent_frames", 0))
+            except Exception:
+                cfg_overlap_frames = 0
+            cfg_overlap_frames = max(0, cfg_overlap_frames)
+            if cfg_overlap_frames > shot_overlap_frames:
+                shot_overlap_frames = cfg_overlap_frames
+            if shot_backend == "sparse_flash_attn" and shot_overlap_frames > 0:
+                if not self._shot_overlap_flash_warned:
+                    log.warning("Shot attention overlap is not supported with sparse_flash_attn backend; forcing overlap_latent_frames to 0.")
+                    self._shot_overlap_flash_warned = True
+                shot_overlap_frames = 0
             raw_token_value = shot_attention_cfg.get("global_token_ratio_or_number", 1.0)
             if not isinstance(raw_token_value, (int, float)):
                 raise ValueError(f"Shot attention expected a numeric global_token_ratio_or_number value, got {type(raw_token_value).__name__} instead.")
@@ -2450,6 +2476,7 @@ class WanModel(torch.nn.Module):
             if shot_indices is not None:
                 raise ValueError("shot_indices were provided but shot attention is disabled. Make sure all nodes agree on the mode.")
             shot_indices_tensor = None
+            shot_overlap_frames = 0
 
         shot_block_config = None
         cross_attn_mask = None
@@ -2583,6 +2610,8 @@ class WanModel(torch.nn.Module):
             latent_frames = grid_sizes[0][0].item()
             if shot_indices_tensor.shape[1] != latent_frames:
                 raise ValueError("Shot attention: shot_indices length does not match the latent frame count.")
+            if shot_overlap_frames > 0:
+                shot_overlap_frames = min(shot_overlap_frames, max(0, latent_frames - 1))
 
             spatial_tokens = int(grid_sizes[0][1].item() * grid_sizes[0][2].item())
             shot_token_labels = shot_indices_tensor.repeat_interleave(spatial_tokens, dim=1)
@@ -2615,6 +2644,7 @@ class WanModel(torch.nn.Module):
                     "mode": shot_mode,
                     "backend": shot_backend,
                     "prefix_tokens": prefix_tokens,
+                    "overlap": shot_overlap_frames,
                 }
                 if token_mode is not None:
                     shot_block_config["token_mode"] = token_mode

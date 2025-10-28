@@ -327,6 +327,7 @@ def sparse_shot_attention(
     backend: str = "auto",
     attention_mode: str = "sdpa",
     prefix_tokens: int = 0,
+    overlap: int = 0,
 ):
     """Shot-aware attention with optional varlen flash kernels or dense fallback."""
     if q.shape != k.shape or q.shape != v.shape:
@@ -338,12 +339,19 @@ def sparse_shot_attention(
         "dense": "sparse_fallback",
     }.get(backend, backend)
     attn_mode_effective = (attention_mode or "sdpa")
+    try:
+        overlap = int(overlap)
+    except Exception:
+        overlap = 0
+    overlap = max(0, overlap)
 
     if backend not in {"sparse_flash_attn", "sparse_fallback"}:
         raise ValueError(f"Unsupported sparse shot attention backend '{backend}'.")
 
     varlen_attn = None
     if backend == "sparse_flash_attn":
+        if overlap > 0:
+            overlap = 0
         varlen_attn = _get_flash_attn_varlen(required=False)
         if varlen_attn is None:
             global _VARLEN_FALLBACK_WARNED
@@ -366,6 +374,7 @@ def sparse_shot_attention(
             causal=causal,
             attention_mode=attn_mode_effective,
             prefix_tokens=prefix_tokens,
+            overlap=overlap,
         )
 
     if varlen_attn is None:
@@ -462,11 +471,17 @@ def _sparse_shot_attention_fallback(
     causal: bool,
     attention_mode: str,
     prefix_tokens: int = 0,
+    overlap: int = 0,
 ):
     batch, seqlen, heads, head_dim = q.shape
     q_bhg = rearrange(q, "b s h d -> b h s d").contiguous()
     k_bhg = rearrange(k, "b s h d -> b h s d").contiguous()
     v_bhg = rearrange(v, "b s h d -> b h s d").contiguous()
+    try:
+        overlap = int(overlap)
+    except Exception:
+        overlap = 0
+    overlap = max(0, overlap)
 
     outputs = []
 
@@ -494,9 +509,22 @@ def _sparse_shot_attention_fallback(
         k_global, v_global = _build_global_reps(k_locals, v_locals, per_g, mode)
 
         out_locals = []
-        for shot_idx, (k_local, v_local, q_local) in enumerate(zip(k_locals, v_locals, q_locals)):
-            parts_k = [k_local]
-            parts_v = [v_local]
+        for shot_idx, q_local in enumerate(q_locals):
+            start = cuts[shot_idx]
+            end = cuts[shot_idx + 1]
+            if overlap > 0:
+                window_start = max(0, start - overlap)
+                window_end = min(seqlen, end + overlap)
+            else:
+                window_start = start
+                window_end = end
+            if window_end <= window_start:
+                window_start = start
+                window_end = end
+            k_window = rearrange(k_bhg[b_idx, :, window_start:window_end, :], "h s d -> s h d")
+            v_window = rearrange(v_bhg[b_idx, :, window_start:window_end, :], "h s d -> s h d")
+            parts_k = [k_window]
+            parts_v = [v_window]
             if k_global.numel() > 0:
                 parts_k.append(k_global)
                 parts_v.append(v_global)

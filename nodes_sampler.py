@@ -326,6 +326,7 @@ class WanVideoSampler:
             shot_attention_cfg.setdefault("mask_type", "none")
             shot_attention_cfg.setdefault("backend", "full")
             shot_attention_cfg.setdefault("global_token_ratio_or_number", 1.0)
+            shot_attention_cfg.setdefault("overlap_latent_frames", 0)
             shot_mask_type = shot_attention_cfg.get("mask_type")
 
         shot_lora_specs = holocine_args.get("shot_loras") if args_present else None
@@ -726,6 +727,7 @@ class WanVideoSampler:
         latent_video_length = noise.shape[1]
 
         smooth_windows = None
+        shot_overlap = 0
         if shot_attention_cfg:
             debug_info = {"holocine_args_present": holocine_args is not None,
                            "text_cut_positions_type": type(text_cut_positions).__name__,
@@ -749,15 +751,42 @@ class WanVideoSampler:
                 legacy_flags = holocine_args.get("smooth_transitions")
                 if legacy_flags is not None:
                     smooth_windows = [SMOOTH_WINDOW_TOKENS if bool(flag) else 0 for flag in legacy_flags]
+            overlap_windows = holocine_args.get("overlap_latent_frames")
             try:
                 shot_indices_tensor = build_shot_indices(latent_video_length, shot_cut_frames)
                 shot_indices_tensor = shot_indices_tensor.to(device)
             except Exception as exc:
                 raise ValueError(f"Failed to build shot indices: {exc}. Debug: {debug_info}") from exc
+
+            overlap_source = shot_attention_cfg.get("overlap_latent_frames", 0)
+            try:
+                shot_overlap = int(overlap_source)
+            except Exception:
+                shot_overlap = 0
+            shot_overlap = max(0, shot_overlap)
+            if overlap_windows is not None:
+                if isinstance(overlap_windows, (list, tuple)):
+                    overlap_candidates: list[int] = []
+                    for value in overlap_windows:
+                        try:
+                            overlap_candidates.append(int(value))
+                        except Exception:
+                            continue
+                    if overlap_candidates:
+                        shot_overlap = max(shot_overlap, max(overlap_candidates))
+                else:
+                    try:
+                        shot_overlap = max(shot_overlap, int(overlap_windows))
+                    except Exception:
+                        pass
+            if latent_video_length > 0:
+                shot_overlap = min(shot_overlap, max(0, latent_video_length - 1))
         else:
             first_shot_positions = None
             shot_indices_tensor = None
             smooth_windows = None
+            overlap_windows = None
+            shot_overlap = 0
 
         # Initialize FreeInit filter if enabled
         freq_filter = None
@@ -1565,6 +1594,7 @@ class WanVideoSampler:
                     'shot_mask_type': shot_mask_type,
                     'text_cut_positions': first_shot_positions if shot_attention_cfg else None,
                     'smooth_windows': smooth_windows if shot_attention_cfg else None,
+                    'shot_overlap': shot_overlap if shot_attention_cfg else 0,
                     "uni3c_data": uni3c_data_input, # Uni3C input
                     "controlnet": controlnet, # TheDenk's controlnet input
                     "add_cond": add_cond_input, # additional conditioning input
@@ -1630,11 +1660,14 @@ class WanVideoSampler:
 
                         positions_backup = None
                         smooth_backup = None
+                        overlap_backup = None
                         if shot_attention_cfg:
                             positions_backup = base_params.get('text_cut_positions')
                             smooth_backup = base_params.get('smooth_windows')
+                            overlap_backup = base_params.get('shot_overlap')
                             base_params['text_cut_positions'] = None
                             base_params['smooth_windows'] = None
+                            base_params['shot_overlap'] = 0
                         try:
                             #unconditional (negative) pass
                             base_params['is_uncond'] = True
@@ -1739,6 +1772,7 @@ class WanVideoSampler:
                             if shot_attention_cfg:
                                 base_params['text_cut_positions'] = positions_backup
                                 base_params['smooth_windows'] = smooth_backup
+                                base_params['shot_overlap'] = overlap_backup if overlap_backup is not None else base_params.get('shot_overlap', 0)
                             base_params['is_uncond'] = False
 
                     #batched
