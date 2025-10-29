@@ -131,7 +131,7 @@ class CustomLinear(nn.Linear):
                 patch_diff = torch.mm(
                     lora_diff_0.flatten(start_dim=1),
                     lora_diff_1.flatten(start_dim=1)
-                ).reshape(weight.shape)
+                ).reshape(weight.shape) + 0
                 alpha = lora_diff_2 / lora_diff_1.shape[0] if lora_diff_2 is not None else 1.0
                 scale = lora_strength * alpha
                 weight = weight.add(patch_diff, alpha=scale)
