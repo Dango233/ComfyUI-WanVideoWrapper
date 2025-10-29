@@ -2255,6 +2255,8 @@ class WanVideoSampler:
                                 timesteps.append(0.)
                                 timesteps = [torch.tensor([t], device=device) for t in timesteps]
                                 timesteps = [timestep_transform(t, shift=shift, num_timesteps=1000) for t in timesteps]
+                            elif isinstance(scheduler, dict):
+                                sample_scheduler = copy.deepcopy(scheduler["sample_scheduler"])
                             else:
                                 sample_scheduler, timesteps,_,_ = get_scheduler(scheduler, total_steps, start_step, end_step, shift, device, transformer.dim, flowedit_args, denoise_strength, sigmas=sigmas)
                                 timesteps = [torch.tensor([float(t)], device=device) for t in timesteps] + [torch.tensor([0.], device=device)]
@@ -2567,7 +2569,10 @@ class WanVideoSampler:
                             if s2v_pose is not None:
                                 s2v_pose_slice = pose_cond_list[r].to(device)
 
-                            sample_scheduler, timesteps,_,_ = get_scheduler(scheduler, total_steps, start_step, end_step, shift, device, transformer.dim, flowedit_args, denoise_strength, sigmas=sigmas)
+                            if isinstance(scheduler, dict):
+                                sample_scheduler = copy.deepcopy(scheduler["sample_scheduler"])
+                            else:
+                                sample_scheduler, timesteps,_,_ = get_scheduler(scheduler, total_steps, start_step, end_step, shift, device, transformer.dim, flowedit_args, denoise_strength, sigmas=sigmas)
 
                             latent = noise.to(device)
                             for i, t in enumerate(tqdm(timesteps, desc=f"Sampling audio indices {left_idx}-{right_idx}", position=0)):
@@ -2784,7 +2789,10 @@ class WanVideoSampler:
                                     thresholds = thresholds.reshape(-1, 1, 1, 1, 1).to(device)
                                     masks = (1-noise_mask.repeat(len(timesteps), 1, 1, 1, 1).to(device)) > thresholds
 
-                            sample_scheduler, timesteps,_,_ = get_scheduler(scheduler, total_steps, start_step, end_step, shift, device, transformer.dim, flowedit_args, denoise_strength, sigmas=sigmas)
+                            if isinstance(scheduler, dict):
+                                sample_scheduler = copy.deepcopy(scheduler["sample_scheduler"])
+                            else:
+                                sample_scheduler, timesteps,_,_ = get_scheduler(scheduler, total_steps, start_step, end_step, shift, device, transformer.dim, flowedit_args, denoise_strength, sigmas=sigmas)
 
                             # sample videos
                             latent = noise
