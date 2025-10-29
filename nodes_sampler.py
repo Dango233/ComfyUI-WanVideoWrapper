@@ -3077,10 +3077,36 @@ class WanVideoSampler:
             "samples": callback_latent.unsqueeze(0).cpu() if callback is not None else None,
         })
 
+class WanVideoSamplerSettings(WanVideoSampler):
+    RETURN_TYPES = ("SAMPLER_ARGS",)
+    RETURN_NAMES = ("sampler_inputs", )
+    DESCRIPTION = "Node to output all settings and inputs for the WanVideoSamplerFromSettings -node"
+    def process(self, *args, **kwargs):
+        import inspect
+        params = inspect.signature(WanVideoSampler.process).parameters
+        args_dict = {name: kwargs.get(name, param.default if param.default is not inspect.Parameter.empty else None)
+                     for name, param in params.items() if name != "self"}
+        return args_dict,
+
+class WanVideoSamplerFromSettings(WanVideoSampler):
+    DESCRIPTION = "Utility node with no other functionality than to look cleaner, useful for the live preview as the main sampler node has become a messy monster"
+    @classmethod
+    def INPUT_TYPES(s):
+        return {
+            "required": {
+                "sampler_inputs": ("SAMPLER_ARGS",),},
+        }
+
+    def process(self, sampler_inputs):
+        return super().process(**sampler_inputs)
 
 NODE_CLASS_MAPPINGS = {
     "WanVideoSampler": WanVideoSampler,
+    "WanVideoSamplerSettings": WanVideoSamplerSettings,
+    "WanVideoSamplerFromSettings": WanVideoSamplerFromSettings,
     }
 NODE_DISPLAY_NAME_MAPPINGS = {
     "WanVideoSampler": "WanVideo Sampler",
+    "WanVideoSamplerSettings": "WanVideo Sampler Settings",
+    "WanVideoSamplerFromSettings": "WanVideo Sampler From Settings",
 }
