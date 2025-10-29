@@ -2255,10 +2255,12 @@ class WanVideoSampler:
                                 timesteps.append(0.)
                                 timesteps = [torch.tensor([t], device=device) for t in timesteps]
                                 timesteps = [timestep_transform(t, shift=shift, num_timesteps=1000) for t in timesteps]
-                            elif isinstance(scheduler, dict):
-                                sample_scheduler = copy.deepcopy(scheduler["sample_scheduler"])
                             else:
-                                sample_scheduler, timesteps,_,_ = get_scheduler(scheduler, total_steps, start_step, end_step, shift, device, transformer.dim, flowedit_args, denoise_strength, sigmas=sigmas)
+                                if isinstance(scheduler, dict):
+                                    sample_scheduler = copy.deepcopy(scheduler["sample_scheduler"])
+                                    timesteps = scheduler["timesteps"]
+                                else:
+                                    sample_scheduler, timesteps,_,_ = get_scheduler(scheduler, total_steps, start_step, end_step, shift, device, transformer.dim, flowedit_args, denoise_strength, sigmas=sigmas)
                                 timesteps = [torch.tensor([float(t)], device=device) for t in timesteps] + [torch.tensor([0.], device=device)]
 
                             # sample videos
@@ -2571,6 +2573,7 @@ class WanVideoSampler:
 
                             if isinstance(scheduler, dict):
                                 sample_scheduler = copy.deepcopy(scheduler["sample_scheduler"])
+                                timesteps = scheduler["timesteps"]
                             else:
                                 sample_scheduler, timesteps,_,_ = get_scheduler(scheduler, total_steps, start_step, end_step, shift, device, transformer.dim, flowedit_args, denoise_strength, sigmas=sigmas)
 
@@ -2791,6 +2794,7 @@ class WanVideoSampler:
 
                             if isinstance(scheduler, dict):
                                 sample_scheduler = copy.deepcopy(scheduler["sample_scheduler"])
+                                timesteps = scheduler["timesteps"]
                             else:
                                 sample_scheduler, timesteps,_,_ = get_scheduler(scheduler, total_steps, start_step, end_step, shift, device, transformer.dim, flowedit_args, denoise_strength, sigmas=sigmas)
 
