@@ -74,6 +74,13 @@ HuMo: https://github.com/Phantom-video/HuMo
 
 WanAnimate: https://github.com/Wan-Video/Wan2.2/tree/main/wan/modules/animate
 
+Lynx: https://github.com/bytedance/lynx
+
+
+Not exactly Wan model, but close enough to work with the code base:
+
+LongCat-Video: https://meituan-longcat.github.io/LongCat-Video/
+
 
 Examples:
 ---
