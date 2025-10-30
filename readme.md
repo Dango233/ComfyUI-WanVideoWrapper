@@ -1,3 +1,5 @@
+## Note: Due to the stupid amount of bots or people thinking this is some of video generation service, I've blocked new accounts from posting issues for now.
+
 # ComfyUI wrapper nodes for [WanVideo](https://github.com/Wan-Video/Wan2.1) and related models.
 
 # WORK IN PROGRESS (perpetually)
