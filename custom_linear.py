@@ -89,14 +89,14 @@ class CustomLinear(nn.Linear):
     def set_lora_diffs(self, lora_diffs, device=torch.device("cpu")):
         self.lora_diffs = []
         for i, diff in enumerate(lora_diffs):
-            if isinstance(diff, tuple):
+            if len(diff) > 1:
                 self.register_buffer(f"lora_diff_{i}_0", diff[0].to(device))
                 self.register_buffer(f"lora_diff_{i}_1", diff[1].to(device))
                 setattr(self, f"lora_diff_{i}_2", diff[2])
                 self.lora_diffs.append((f"lora_diff_{i}_0", f"lora_diff_{i}_1", f"lora_diff_{i}_2"))
             else:
-                self.register_buffer(f"lora_diff_{i}", diff.to(device))
-                self.lora_diffs.append(f"lora_diff_{i}")
+                self.register_buffer(f"lora_diff_{i}_0", diff[0].to(device))
+                self.lora_diffs.append(f"lora_diff_{i}_0")
 
     def forward(self, input):
         if self.bias is not None:
