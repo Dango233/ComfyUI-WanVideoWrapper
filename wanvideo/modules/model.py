@@ -24,6 +24,28 @@ from ...echoshot.echoshot import rope_apply_z, rope_apply_c, rope_apply_echoshot
 
 from ...MTV.mtv import apply_rotary_emb
 
+from comfy import model_management as mm
+
+__all__ = ['WanModel']
+
+class AdaLayerNorm(nn.Module):
+    def __init__(self, embedding_dim, output_dim=None, norm_elementwise_affine=False, norm_eps=1e-5, dtype=None, device=None, operations=None):
+        super().__init__()
+
+        output_dim = output_dim or embedding_dim * 2
+
+        self.silu = nn.SiLU()
+        self.linear = operations.Linear(embedding_dim, output_dim, dtype=dtype, device=device)
+        self.norm = operations.LayerNorm(output_dim // 2, norm_eps, norm_elementwise_affine, dtype=dtype, device=device)
+
+    def forward(self, x, temb):
+        temb = self.linear(self.silu(temb))
+        shift, scale = temb.chunk(2, dim=1)
+        shift = shift[:, None, :]
+        scale = scale[:, None, :]
+        x = self.norm(x) * (1 + scale) + shift
+        return x
+
 class FramePackMotioner(nn.Module):#from comfy.ldm.wan.model
     def __init__(
             self,
@@ -77,21 +99,10 @@ class FramePackMotioner(nn.Module):#from comfy.ldm.wan.model
         rope = torch.cat([rope_post, rope_2x, rope_4x], dim=1)
         return motion_lat, rope
 
-from diffusers.models.attention import AdaLayerNorm
-
-__all__ = ['WanModel']
-
-from comfy import model_management as mm
-
-
 def zero_module(module):
-    """
-    Zero out the parameters of a module and return it.
-    """
     for p in module.parameters():
         p.detach().zero_()
     return module
-
 
 def torch_dfs(model: nn.Module, parent_name='root'):
     module_names, modules = [], []
@@ -404,7 +415,7 @@ class WanLayerNorm(nn.LayerNorm):
         """
         return super().forward(x)
 
-
+#region selfattn
 class WanSelfAttention(nn.Module):
 
     def __init__(self,
@@ -883,29 +894,12 @@ WAN_CROSSATTENTION_CLASSES = {
 class WanAttentionBlock(nn.Module):
 
     def __init__(self,
-                 cross_attn_type,
-                 in_features,
-                 out_features,
-                 ffn_dim,
-                 ffn2_dim,
-                 num_heads,
-                 qk_norm=True,
-                 cross_attn_norm=False,
-                 eps=1e-6,
-                 attention_mode="sdpa",
-                 rope_func="comfy",
-                 rms_norm_function="default",
-                 use_motion_attn=False,
-                 use_humo_audio_attn=False,
-                 face_fuser_block=False,
-                 lynx_ip_layers=None,
-                 lynx_ref_layers=None,
-                 block_idx=0,
-                 # long cat
-                 is_longcat = False,
-                 ):
+                cross_attn_type, in_features, out_features, ffn_dim, ffn2_dim, num_heads,
+                qk_norm=True, cross_attn_norm=False, eps=1e-6, attention_mode="sdpa", rope_func="comfy", rms_norm_function="default",
+                use_motion_attn=False, use_humo_audio_attn=False, face_fuser_block=False, lynx_ip_layers=None, lynx_ref_layers=None,
+                block_idx=0, is_longcat=False):
         super().__init__()
-        self.dim = min(out_features, in_features)
+        self.dim = out_features
         self.ffn_dim = ffn_dim
         self.num_heads = num_heads
         self.head_dim = out_features // num_heads
