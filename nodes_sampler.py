@@ -189,6 +189,11 @@ class WanVideoSampler:
         vae_upscale_factor = 16 if is_5b else 8
 
         # Load weights
+        if transformer.audio_model is not None:
+            for block in transformer.blocks:
+                if hasattr(block, 'audio_block'):
+                    block.audio_block = None
+
         if not transformer.patched_linear and patcher.model["sd"] is not None and len(patcher.patches) != 0:
             transformer = _replace_linear(transformer, dtype, patcher.model["sd"])
             transformer.patched_linear = True
