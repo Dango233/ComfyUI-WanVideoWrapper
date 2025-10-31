@@ -1265,7 +1265,7 @@ class WanAttentionBlock(nn.Module):
                 x = x.to(input_dtype)
                 # MultiTalk
                 if multitalk_audio_embedding is not None and not isinstance(self, VaceWanAttentionBlock):
-                    x_audio = self.audio_cross_attn(self.norm_x(x), encoder_hidden_states=multitalk_audio_embedding,
+                    x_audio = self.audio_cross_attn(self.norm_x(x.to(self.norm_x.weight.dtype)).to(input_dtype), encoder_hidden_states=multitalk_audio_embedding,
                                                 shape=grid_sizes[0], x_ref_attn_map=x_ref_attn_map, human_num=human_num)
                     x = x.add(x_audio, alpha=audio_scale)
 
