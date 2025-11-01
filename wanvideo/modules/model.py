@@ -757,7 +757,7 @@ class WanT2VCrossAttention(WanSelfAttention):
         if text_context.shape[1] == 0:
             raise ValueError("Text context is empty after removing image tokens; cannot perform cross attention.")
 
-      if nag_context is not None and not is_uncond:
+        if nag_context is not None and not is_uncond:
             x = self.normalized_attention_guidance(b, n, d, q, text_context, nag_context, nag_params)
         else:
             if is_longcat:
@@ -877,7 +877,7 @@ class WanI2VCrossAttention(WanSelfAttention):
             x_text = self.normalized_attention_guidance(b, n, d, q, text_context, nag_context, nag_params)
         else:
             # text attention
-          k = self.norm_k(self.k(text_context).to(self.norm_k.weight.dtype)).view(b, -1, n, d).to(x.dtype)
+            k = self.norm_k(self.k(text_context).to(self.norm_k.weight.dtype)).view(b, -1, n, d).to(x.dtype)
             v = self.v(text_context).view(b, -1, n, d)
             x_text = attention(q, k, v, attention_mode=self.attention_mode).flatten(2)
 
@@ -3282,7 +3282,6 @@ class WanModel(torch.nn.Module):
                 humo_audio_scale=humo_audio_scale,
                 lynx_x_ip=lynx_x_ip,
                 lynx_ip_scale=lynx_ip_scale,
-                lynx_ref_scale=lynx_ref_scale,
                 lynx_ref_scale=lynx_ref_scale,
                 num_cond_latents=num_cond_latents,
                 shot_config=shot_block_config if shot_attention_enabled else None,
